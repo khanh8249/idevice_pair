@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.92"
 
 [dependencies]
-idevice = { version = "0.1.65", features = [
+idevice = { version = "0.1.68", features = [
     "afc",
     "core_device_proxy",
     "house_arrest",
