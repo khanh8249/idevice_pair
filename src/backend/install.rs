@@ -1,21 +1,27 @@
 use idevice::{
-    IdeviceError, afc::opcode::AfcFopenMode, house_arrest::HouseArrestClient,
+    afc::opcode::AfcFopenMode,
+    house_arrest::HouseArrestClient,
     installation_proxy::InstallationProxyClient,
+    IdeviceError,
 };
 
-use super::{PairingKind, link::Link};
+use super::{link::Link, PairingKind};
 use crate::known_apps;
 
 const STIKDEBUG_APPSTORE_ID: &str = "com.stik.sj";
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InstalledApp {
     pub name: String,
     pub bundle_id: String,
     pub path: &'static str,
 }
 
-pub async fn list(link: &mut Link, kind: PairingKind) -> Result<Vec<InstalledApp>, IdeviceError> {
+/// List installed applications that support pairing-file injection.
+pub async fn list(
+    link: &mut Link,
+    kind: PairingKind,
+) -> Result<Vec<InstalledApp>, IdeviceError> {
     let apps = link
         .service::<InstallationProxyClient>()
         .await?
@@ -23,6 +29,7 @@ pub async fn list(link: &mut Link, kind: PairingKind) -> Result<Vec<InstalledApp
         .await?;
 
     let mut found = Vec::new();
+
     for (bundle_id, app) in apps {
         let Some(display_name) = app
             .as_dictionary()
@@ -32,35 +39,47 @@ pub async fn list(link: &mut Link, kind: PairingKind) -> Result<Vec<InstalledApp
             continue;
         };
 
-        let name = if display_name == "StikDebug" && bundle_id != STIKDEBUG_APPSTORE_ID {
-            "StikDebug (Sideloaded)"
-        } else {
-            display_name
+        let name =
+            if display_name == "StikDebug" && bundle_id != STIKDEBUG_APPSTORE_ID {
+                "StikDebug (Sideloaded)"
+            } else {
+                display_name
+            };
+
+        let Some(path) = known_apps::path(kind, name) else {
+            continue;
         };
 
-        if let Some(path) = known_apps::path(kind, name) {
-            found.push(InstalledApp {
-                name: name.to_string(),
-                bundle_id,
-                path,
-            });
-        }
+        found.push(InstalledApp {
+            name: name.to_string(),
+            bundle_id,
+            path,
+        });
     }
 
     found.sort_by(|a, b| a.name.cmp(&b.name));
+
     Ok(found)
 }
 
-pub async fn write(link: &mut Link, app: &InstalledApp, bytes: &[u8]) -> Result<(), IdeviceError> {
+/// Write a pairing file into an installed application's Documents container.
+pub async fn write(
+    link: &mut Link,
+    app: &InstalledApp,
+    bytes: &[u8],
+) -> Result<(), IdeviceError> {
     let mut afc = link
         .service::<HouseArrestClient>()
         .await?
         .vend_documents(app.bundle_id.clone())
         .await?;
 
+    let path = format!("/Documents/{}", app.path);
+
     let mut file = afc
-        .open(format!("/Documents/{}", app.path), AfcFopenMode::Wr)
+        .open(path, AfcFopenMode::Wr)
         .await?;
+
     file.write_entire(bytes).await?;
     file.close().await
 }
