@@ -6,7 +6,6 @@ use idevice::{
     provider::{IdeviceProvider, UsbmuxdProvider},
     remote_pairing::{RemotePairingClient, RpPairingSocket},
     rsd::RsdHandshake,
-    rsd::RsdService,
     tcp::handle::AdapterHandle,
     usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdDevice},
     IdeviceError,
@@ -32,16 +31,11 @@ pub enum Link {
     Rsd {
         handle: AdapterHandle,
         rsd: RsdHandshake,
-        // Keep the remote-pairing control connection alive for the
-        // lifetime of the RSD link.
         _tunnel_control: Option<TunnelControl>,
     },
 }
 
 impl Link {
-    /// Create a link through usbmuxd.
-    ///
-    /// This works for both USB and network usbmuxd devices.
     pub fn usbmuxd(device: &UsbmuxdDevice) -> Self {
         Self::Usbmuxd {
             provider: device.to_provider(
@@ -52,7 +46,6 @@ impl Link {
         }
     }
 
-    /// Create an RSD connection through CoreDevice.
     pub async fn over_core_device(
         provider: &dyn IdeviceProvider,
     ) -> Result<Self, IdeviceError> {
@@ -67,7 +60,6 @@ impl Link {
         Self::rsd(handle, rsd_port, None).await
     }
 
-    /// Create an RSD connection over an existing remote-pairing tunnel.
     pub async fn over_remote_pairing(
         handle: AdapterHandle,
         rsd_port: u16,
@@ -103,28 +95,21 @@ impl Link {
         })
     }
 
-    /// Connect to a service regardless of whether the current
-    /// transport is usbmuxd or RSD.
     pub async fn service<T>(&mut self) -> Result<T, IdeviceError>
-where
-    T: IdeviceService,
-{
-    match self {
-        Self::Usbmuxd { provider, .. } => {
-            T::connect(provider).await
-        }
-        Self::Rsd { handle, rsd, .. } => {
-            rsd.connect::<T>(handle).await
-        }
-    }
-}
+    where
+        T: IdeviceService,
+    {
+        match self {
+            Self::Usbmuxd { provider, .. } => {
+                T::connect(provider).await
+            }
+
             Self::Rsd { handle, rsd, .. } => {
                 rsd.connect::<T>(handle).await
             }
         }
     }
 
-    /// Connect directly to an RSD service by name.
     pub async fn connect_rsd_service(
         &mut self,
         name: &str,
@@ -143,21 +128,16 @@ where
             .await
     }
 
-    /// Open a privileged Lockdown session.
     pub async fn lockdown(
         &mut self,
     ) -> Result<LockdownClient, IdeviceError> {
         self.lockdown_client(true).await
     }
 
-    /// Read basic device information.
     pub async fn info(
         &mut self,
     ) -> Result<DeviceInfo, IdeviceError> {
-        let mut client = self
-            .lockdown_client(false)
-            .await?;
-
+        let mut client = self.lockdown_client(false).await?;
         device_info(&mut client).await
     }
 
@@ -186,7 +166,6 @@ where
         Ok(client)
     }
 
-    /// Check whether Developer Mode is enabled.
     pub async fn developer_mode(
         &mut self,
     ) -> Result<bool, IdeviceError> {
@@ -205,7 +184,6 @@ where
             })
     }
 
-    /// Enable wireless debugging through Lockdown.
     pub async fn enable_wireless_debugging(
         &mut self,
     ) -> Result<(), IdeviceError> {
@@ -220,7 +198,6 @@ where
     }
 }
 
-/// Collect basic device information from Lockdown.
 pub async fn device_info(
     client: &mut LockdownClient,
 ) -> Result<DeviceInfo, IdeviceError> {
@@ -237,7 +214,6 @@ pub async fn device_info(
     })
 }
 
-/// Read a string value from Lockdown.
 pub async fn value(
     client: &mut LockdownClient,
     key: &str,
