@@ -106,14 +106,18 @@ impl Link {
     /// Connect to a service regardless of whether the current
     /// transport is usbmuxd or RSD.
     pub async fn service<T>(&mut self) -> Result<T, IdeviceError>
-    where
-        T: IdeviceService + RsdService,
-    {
-        match self {
-            Self::Usbmuxd { provider, .. } => {
-                T::connect(provider).await
-            }
-
+where
+    T: IdeviceService,
+{
+    match self {
+        Self::Usbmuxd { provider, .. } => {
+            T::connect(provider).await
+        }
+        Self::Rsd { handle, rsd, .. } => {
+            rsd.connect::<T>(handle).await
+        }
+    }
+}
             Self::Rsd { handle, rsd, .. } => {
                 rsd.connect::<T>(handle).await
             }
