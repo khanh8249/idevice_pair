@@ -1,10 +1,13 @@
 mod backend;
 mod known_apps;
 
-use std::io::{self, Write};
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+};
 
 use backend::{
-    Backend, Command, Event, PairingKind, Transport,
+    Command, Event, PairingKind, Transport,
 };
 
 #[tokio::main(flavor = "multi_thread")]
@@ -17,11 +20,24 @@ async fn main() {
     let (backend, mut events) = backend::spawn();
 
     println!("Waiting for iOS devices...");
+    println!("USB devices are detected automatically.");
+
+    let mut pairing_started = HashSet::<String>::new();
+    let mut validation_started = HashSet::<String>::new();
+    let mut apps_requested = HashSet::<String>::new();
+    let mut installs_started = HashSet::<String>::new();
 
     loop {
         tokio::select! {
             Some(event) = events.recv() => {
-                handle_event(event);
+                handle_event(
+                    &backend,
+                    event,
+                    &mut pairing_started,
+                    &mut validation_started,
+                    &mut apps_requested,
+                    &mut installs_started,
+                );
             }
 
             result = tokio::signal::ctrl_c() => {
@@ -38,15 +54,22 @@ async fn main() {
     drop(backend);
 }
 
-fn handle_event(event: Event) {
+fn handle_event(
+    backend: &backend::Backend,
+    event: Event,
+    pairing_started: &mut HashSet<String>,
+    validation_started: &mut HashSet<String>,
+    apps_requested: &mut HashSet<String>,
+    installs_started: &mut HashSet<String>,
+) {
     match event {
         Event::Devices(devices) => {
-            println!("\nDevices:");
-
             if devices.is_empty() {
-                println!("  No devices found.");
+                println!("\nNo iOS devices found.");
                 return;
             }
+
+            println!("\nDevices:");
 
             for device in devices {
                 let transport = match device.transport {
@@ -61,19 +84,37 @@ fn handle_event(event: Event) {
                     transport,
                     device.key
                 );
+
+                /*
+                 * USB devices can immediately enter the pairing flow.
+                 *
+                 * Network/Remote devices are left alone here because
+                 * they may require their own pairing/discovery flow.
+                 */
+                if device.transport == Transport::Usb
+                    && pairing_started.insert(device.key.clone())
+                {
+                    println!(
+                        "{}: device detected, inspecting...",
+                        device.key
+                    );
+
+                    backend.send(Command::Inspect(device.key));
+                }
             }
 
-            print!("> ");
             let _ = io::stdout().flush();
         }
 
         Event::AppleTvs(devices) => {
-            if !devices.is_empty() {
-                println!("\nRemote Pairing hosts:");
+            if devices.is_empty() {
+                return;
+            }
 
-                for device in devices {
-                    println!("  {}", device.name);
-                }
+            println!("\nRemote Pairing hosts:");
+
+            for device in devices {
+                println!("  {}", device.name);
             }
         }
 
@@ -94,7 +135,9 @@ fn handle_event(event: Event) {
                 }
 
                 Err(error) => {
-                    eprintln!("Failed to inspect {key}: {error}");
+                    eprintln!(
+                        "Failed to inspect {key}: {error}"
+                    );
                 }
             }
         }
@@ -127,19 +170,58 @@ fn handle_event(event: Event) {
                     eprintln!("{key}: {name}: {error}");
                 }
             }
+
+            /*
+             * Developer mode is only an informational check.
+             *
+             * The pairing flow itself starts after the device has
+             * been inspected. We intentionally do not trigger pairing
+             * from this event because Inspect emits multiple Check
+             * events and that would make the flow race.
+             *
+             * The actual pairing command is triggered by the
+             * successful device inspection below.
+             */
         }
 
         Event::PairRecord { key, stored } => {
             println!(
                 "{key}: pairing record: {}",
-                if stored { "available" } else { "missing" }
+                if stored {
+                    "available"
+                } else {
+                    "missing"
+                }
             );
+
+            /*
+             * If a USB device already has a stored lockdown record,
+             * the backend can still create the pairing payload and
+             * normalize the UDID for us.
+             */
+            if stored
+                && pairing_started.insert(format!("{key}:stored"))
+            {
+                println!(
+                    "{key}: stored pairing record available."
+                );
+            }
         }
 
         Event::Apps { key, result } => {
             match result {
                 Ok(apps) => {
-                    println!("{key}: {} supported apps", apps.len());
+                    println!(
+                        "\n{key}: {} supported apps",
+                        apps.len()
+                    );
+
+                    if apps.is_empty() {
+                        println!(
+                            "{key}: no supported pairing targets found."
+                        );
+                        return;
+                    }
 
                     for app in apps {
                         println!(
@@ -147,11 +229,28 @@ fn handle_event(event: Event) {
                             app.name,
                             app.bundle_id
                         );
+
+                        let install_key =
+                            format!("{}:{}", key, app.name);
+
+                        if installs_started.insert(install_key) {
+                            println!(
+                                "{key}: installing pairing file into {}...",
+                                app.name
+                            );
+
+                            backend.send(Command::Install {
+                                key: key.clone(),
+                                app,
+                            });
+                        }
                     }
                 }
 
                 Err(error) => {
-                    eprintln!("{key}: failed to list apps: {error}");
+                    eprintln!(
+                        "{key}: failed to list apps: {error}"
+                    );
                 }
             }
         }
@@ -164,13 +263,26 @@ fn handle_event(event: Event) {
             match result {
                 Ok(pairing) => {
                     println!(
-                        "{key}: pairing file created ({:?})",
-                        pairing
+                        "\n{key}: pairing file created: {}",
+                        pairing.file_name
                     );
+
+                    println!(
+                        "{key}: validating pairing..."
+                    );
+
+                    if validation_started.insert(key.clone()) {
+                        backend.send(Command::Validate {
+                            key,
+                            ip: None,
+                        });
+                    }
                 }
 
                 Err(error) => {
-                    eprintln!("{key}: pairing failed: {error}");
+                    eprintln!(
+                        "{key}: pairing failed: {error}"
+                    );
                 }
             }
         }
@@ -178,11 +290,30 @@ fn handle_event(event: Event) {
         Event::Validation { key, result } => {
             match result {
                 Ok(()) => {
-                    println!("{key}: pairing validation succeeded");
+                    println!(
+                        "{key}: pairing validation succeeded."
+                    );
+
+                    println!(
+                        "{key}: searching for supported apps..."
+                    );
+
+                    if apps_requested.insert(key.clone()) {
+                        backend.send(Command::ListApps {
+                            key,
+                            kind: PairingKind::Lockdown,
+                        });
+                    }
                 }
 
                 Err(error) => {
-                    eprintln!("{key}: pairing validation failed: {error}");
+                    eprintln!(
+                        "{key}: pairing validation failed: {error}"
+                    );
+
+                    eprintln!(
+                        "{key}: pairing file will not be installed."
+                    );
                 }
             }
         }
@@ -194,11 +325,15 @@ fn handle_event(event: Event) {
         } => {
             match result {
                 Ok(()) => {
-                    println!("{key}: installed pairing file into {app}");
+                    println!(
+                        "{key}: pairing file installed into {app}."
+                    );
                 }
 
                 Err(error) => {
-                    eprintln!("{key}: failed to install into {app}: {error}");
+                    eprintln!(
+                        "{key}: failed to install into {app}: {error}"
+                    );
                 }
             }
         }
@@ -206,11 +341,15 @@ fn handle_event(event: Event) {
         Event::Wireless(status) => {
             match status {
                 backend::WirelessStatus::Advertising(name) => {
-                    println!("Wireless pairing: advertising as {name}");
+                    println!(
+                        "Wireless pairing: advertising as {name}"
+                    );
                 }
 
                 backend::WirelessStatus::Connected => {
-                    println!("Wireless pairing: device connected");
+                    println!(
+                        "Wireless pairing: device connected"
+                    );
                 }
 
                 backend::WirelessStatus::EnterPin(host) => {
@@ -220,15 +359,21 @@ fn handle_event(event: Event) {
                 }
 
                 backend::WirelessStatus::Pin(pin) => {
-                    println!("Wireless pairing PIN: {pin}");
+                    println!(
+                        "Wireless pairing PIN: {pin}"
+                    );
                 }
 
                 backend::WirelessStatus::Paired(key) => {
-                    println!("Wireless pairing completed: {key}");
+                    println!(
+                        "Wireless pairing completed: {key}"
+                    );
                 }
 
                 backend::WirelessStatus::Failed(error) => {
-                    eprintln!("Wireless pairing failed: {error}");
+                    eprintln!(
+                        "Wireless pairing failed: {error}"
+                    );
                 }
             }
         }
