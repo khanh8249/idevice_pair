@@ -2,87 +2,71 @@ name: Build Android ARMv7
 
 on:
   push:
-    branches:
-      - master
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-24.04
+env:
+  CARGO_TERM_COLOR: always
+  ANDROID_NDK_VERSION: 25.2.9519653
 
-    env:
-      NDK_VERSION: "27.3.13750724"
-      ANDROID_API: "24"
+jobs:
+  build-armv7:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      # ---------- Cache Rust toolchain ----------
+      - name: Cache Rust Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            ~/.cargo/bin/
+            ~/.rustup/
+            target/
+          key: rust-cargo-${{ runner.os }}-armv7-${{ hashFiles('**/Cargo.lock') }}
+aml          restore-keys: |
+            rust-cargo-${{ runner.os }}-armv7-
+
+      # ---------- Cài đặt Rust ----------
+     
+ - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: armv7-linux-androideabi
+          targets     : armv7-linux-androideabi
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # ---------- Cài đặt NDK ----------
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25b
+          add-to-path: true
 
-      - name: Install Android NDK
-        shell: bash
+      - name: Export NDK env
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-${ANDROID_API}" "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
-      - name: Verify Android toolchain
-        shell: bash
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-
-          sdkmanager --list_installed | grep -E "platform-tools|platforms;android-${ANDROID_API}|ndk;${NDK_VERSION}" || true
-
-          ls -la "$ANDROID_HOME/ndk/${NDK_VERSION}"
-
+      # ---------- Cài cargo-ndk ----------
       - name: Install cargo-ndk
-        shell: bash
-        run: |
-          cargo install cargo-ndk --version 4.1.2 --locked
+        run: cargo install cargo-ndk --locked
 
-      - name: Build ARMv7
-        shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
-        run: |
-          cargo ndk \
-            -t armeabi-v7a \
-            -p ${ANDROID_API} \
-            build \
-            --release
+      # ---------- Build ----------
+      - name: Build for ARMv7
+        run: cargo ndk -t armeabi-v7a -o ./jniLibs build --release
 
-      - name: Show binary
-        shell: bash
-        run: |
-          find target -type f -executable -print || true
-          file target/armv7-linux-androideabi/release/idevice_pair || true
-
-      - name: Package
-        shell: bash
-        run: |
-          mkdir -p dist
-
-          cp \
-            target/armv7-linux-androideabi/release/idevice_pair \
-            dist/idevice_pair-armv7
-
-          chmod +x dist/idevice_pair-armv7
-
-          tar -czf \
-            dist/idevice_pair-android-armv7.tar.gz \
-            -C dist \
-            idevice_pair-armv7
-
-      - name: Upload ARMv7 binary
+      # ---------- Upload artifact ----------
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: idevice_pair-android-armv7
-          path: dist/idevice_pair-android-armv7.tar.gz
+          name: android-armv7-binary
+          path: |
+            target/armv7-linux-androideabi/release/
+            jniLibs/armeabi-v7a/
+          if-no-files-found: error
