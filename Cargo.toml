@@ -31,3 +31,6 @@ mdns-sd = "0.20"
 uuid = { version = "1.24", features = ["v4"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[patch.crates-io]
+idevice = { git = "https://github.com/khanh8249/idevice", branch = "master", package = "idevice" }
