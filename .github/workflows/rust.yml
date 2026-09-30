@@ -14,38 +14,49 @@ jobs:
 
     env:
       CARGO_TERM_COLOR: always
-      NDK_VERSION: r27d
+      NDK_VERSION: 27.3.13750724
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           target: armv7-linux-androideabi
 
-      - name: Install build dependencies
+      - name: Locate Android SDK
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang \
-            lld \
-            pkg-config \
-            libssl-dev
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}" >> "$GITHUB_ENV"
+
+          if [ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" >> "$GITHUB_ENV"
+          elif [ -x "$ANDROID_SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" ]; then
+            echo "SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" >> "$GITHUB_ENV"
+          else
+            echo "sdkmanager not found"
+            find "$ANDROID_SDK_ROOT" -name sdkmanager -type f -print
+            exit 1
+          fi
+
+      - name: Accept Android licenses
+        run: |
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
 
       - name: Install Android NDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK
         run: |
-          sdkmanager --install "ndk;${NDK_VERSION}"
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-24" \
+            "ndk;${NDK_VERSION}"
 
       - name: Configure Android NDK
         run: |
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
 
       - name: Install cargo-ndk
         run: |
@@ -59,16 +70,25 @@ jobs:
             build \
             --release
 
-      - name: Show binary
+      - name: Verify binary
         run: |
-          file target/armv7-linux-androideabi/release/idevice_pair || true
-          ls -lh target/armv7-linux-androideabi/release/
+          BIN="target/armv7-linux-androideabi/release/idevice_pair"
+
+          if [ ! -f "$BIN" ]; then
+            echo "Binary not found:"
+            find target -type f -perm -111 -print
+            exit 1
+          fi
+
+          file "$BIN"
+          ls -lh "$BIN"
 
       - name: Prepare artifact
         run: |
           mkdir -p artifact
 
-          cp target/armv7-linux-androideabi/release/idevice_pair \
+          cp \
+            target/armv7-linux-androideabi/release/idevice_pair \
             artifact/idevice_pair-armv7-android
 
           chmod +x artifact/idevice_pair-armv7-android
