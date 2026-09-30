@@ -12,7 +12,7 @@ jobs:
 
     env:
       NDK_VERSION: "27.3.13750724"
-      RUSTFLAGS: "-D warnings"
+      ANDROID_API: "24"
 
     steps:
       - name: Checkout
@@ -26,45 +26,63 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Setup Android NDK
-        uses: android-actions/setup-ndk@v3
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-${ANDROID_API}" "ndk;${NDK_VERSION}"
+
+      - name: Verify Android toolchain
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+
+          sdkmanager --list_installed | grep -E "platform-tools|platforms;android-${ANDROID_API}|ndk;${NDK_VERSION}" || true
+
+          ls -la "$ANDROID_HOME/ndk/${NDK_VERSION}"
 
       - name: Install cargo-ndk
+        shell: bash
         run: |
           cargo install cargo-ndk --version 4.1.2 --locked
 
-      - name: Verify toolchain
-        run: |
-          rustc --version
-          cargo --version
-          cargo ndk --version
-          echo "ANDROID_NDK=$ANDROID_NDK"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-
-      - name: Build ARMv7 Android
+      - name: Build ARMv7
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
         run: |
           cargo ndk \
             -t armeabi-v7a \
-            --platform 24 \
-            build --release
+            -p ${ANDROID_API} \
+            build \
+            --release
 
-      - name: Prepare artifact
+      - name: Show binary
+        shell: bash
+        run: |
+          find target -type f -executable -print || true
+          file target/armv7-linux-androideabi/release/idevice_pair || true
+
+      - name: Package
+        shell: bash
         run: |
           mkdir -p dist
 
           cp \
-            target/armv7-linux-androideabi/release/idevice-pair \
-            dist/idevice-pair-armv7-android
+            target/armv7-linux-androideabi/release/idevice_pair \
+            dist/idevice_pair-armv7
 
-          chmod +x dist/idevice-pair-armv7-android
+          chmod +x dist/idevice_pair-armv7
 
-          file dist/idevice-pair-armv7-android
+          tar -czf \
+            dist/idevice_pair-android-armv7.tar.gz \
+            -C dist \
+            idevice_pair-armv7
 
       - name: Upload ARMv7 binary
         uses: actions/upload-artifact@v4
         with:
-          name: idevice-pair-armv7-android
-          path: dist/idevice-pair-armv7-android
-          if-no-files-found: error
+          name: idevice_pair-android-armv7
+          path: dist/idevice_pair-android-armv7.tar.gz
