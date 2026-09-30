@@ -1,94 +1,236 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
-mod app;
 mod backend;
 mod known_apps;
-mod logging;
-mod ui;
 
-use eframe::egui;
+use std::io::{self, Write};
 
-fn main() -> eframe::Result {
-    let logs = logging::init();
+use backend::{
+    Backend, Command, Event, PairingKind, Transport,
+};
 
-    eframe::run_native(
-        &format!("idevice pair v{}", env!("CARGO_PKG_VERSION")),
-        native_options(),
-        Box::new(|cc| {
-            ui::setup(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(&cc.egui_ctx, logs)))
-        }),
-    )
-}
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
+    println!(
+        "idevice pair v{}",
+        env!("CARGO_PKG_VERSION")
+    );
 
-fn native_options() -> eframe::NativeOptions {
-    let viewport = egui::ViewportBuilder::default().with_inner_size([760.0, 620.0]);
+    let (backend, mut events) = backend::spawn();
 
-    #[cfg(target_os = "macos")]
-    let viewport = viewport.with_icon(std::sync::Arc::new(egui::IconData::default()));
+    println!("Waiting for iOS devices...");
 
-    #[cfg(not(target_os = "macos"))]
-    let viewport = {
-        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../icon.png"))
-            .expect("bad icon data");
-        viewport.with_icon(std::sync::Arc::new(icon))
-    };
+    loop {
+        tokio::select! {
+            Some(event) = events.recv() => {
+                handle_event(event);
+            }
 
-    let mut options = eframe::NativeOptions {
-        viewport,
-        renderer: pick_renderer(),
-        ..Default::default()
-    };
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    eprintln!("Failed to listen for Ctrl+C: {error}");
+                }
 
-    use eframe::egui_wgpu::WgpuSetup;
-    if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        let default_device_descriptor = std::sync::Arc::clone(&setup.device_descriptor);
-        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
-            let mut descriptor = default_device_descriptor(adapter);
-
-            // Clamp eframe's requested limits to the adapter's capabilities.
-            // Raspberry Pi 5, for example, supports 4 rather than 8 color attachments.
-            descriptor.required_limits = descriptor
-                .required_limits
-                .or_worse_values_from(&adapter.limits());
-
-            descriptor
-        });
-    }
-
-    options
-}
-
-/// Fall back to OpenGL when Metal fails on Macs patched with OpenCore.
-#[cfg(target_os = "macos")]
-fn pick_renderer() -> eframe::Renderer {
-    use eframe::wgpu;
-
-    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-    descriptor.backends = wgpu::Backends::METAL;
-    let instance = wgpu::Instance::new(descriptor);
-
-    let result = pollster::block_on(async {
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .map_err(|e| e.to_string())?;
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .map_err(|e| e.to_string())
-    });
-
-    match result {
-        Ok(_) => eframe::Renderer::Wgpu,
-        Err(error) => {
-            tracing::warn!("Metal initialization failed; falling back to OpenGL: {error}");
-            eframe::Renderer::Glow
+                println!("\nExiting...");
+                break;
+            }
         }
     }
+
+    drop(backend);
 }
 
-#[cfg(not(target_os = "macos"))]
-fn pick_renderer() -> eframe::Renderer {
-    eframe::Renderer::Wgpu
+fn handle_event(event: Event) {
+    match event {
+        Event::Devices(devices) => {
+            println!("\nDevices:");
+
+            if devices.is_empty() {
+                println!("  No devices found.");
+                return;
+            }
+
+            for device in devices {
+                let transport = match device.transport {
+                    Transport::Usb => "USB",
+                    Transport::Network => "Network",
+                    Transport::Remote => "Remote",
+                };
+
+                println!(
+                    "  {} [{}] {}",
+                    device.name,
+                    transport,
+                    device.key
+                );
+            }
+
+            print!("> ");
+            let _ = io::stdout().flush();
+        }
+
+        Event::AppleTvs(devices) => {
+            if !devices.is_empty() {
+                println!("\nRemote Pairing hosts:");
+
+                for device in devices {
+                    println!("  {}", device.name);
+                }
+            }
+        }
+
+        Event::UsbmuxdFailure(error) => {
+            eprintln!("usbmuxd error: {error}");
+        }
+
+        Event::Info { key, result } => {
+            match result {
+                Ok(info) => {
+                    println!(
+                        "\nDevice: {}\n  Model: {}\n  iOS: {}\n  UDID: {}",
+                        key,
+                        info.model,
+                        info.version,
+                        info.udid
+                    );
+                }
+
+                Err(error) => {
+                    eprintln!("Failed to inspect {key}: {error}");
+                }
+            }
+        }
+
+        Event::Check {
+            key,
+            check,
+            result,
+        } => {
+            let name = match check {
+                backend::Check::WirelessDebugging => {
+                    "Wireless debugging"
+                }
+
+                backend::Check::DeveloperMode => {
+                    "Developer mode"
+                }
+            };
+
+            match result {
+                Ok(true) => {
+                    println!("{key}: {name}: enabled");
+                }
+
+                Ok(false) => {
+                    println!("{key}: {name}: disabled");
+                }
+
+                Err(error) => {
+                    eprintln!("{key}: {name}: {error}");
+                }
+            }
+        }
+
+        Event::PairRecord { key, stored } => {
+            println!(
+                "{key}: pairing record: {}",
+                if stored { "available" } else { "missing" }
+            );
+        }
+
+        Event::Apps { key, result } => {
+            match result {
+                Ok(apps) => {
+                    println!("{key}: {} supported apps", apps.len());
+
+                    for app in apps {
+                        println!(
+                            "  {} ({})",
+                            app.name,
+                            app.bundle_id
+                        );
+                    }
+                }
+
+                Err(error) => {
+                    eprintln!("{key}: failed to list apps: {error}");
+                }
+            }
+        }
+
+        Event::Progress { key, message } => {
+            println!("{key}: {message}");
+        }
+
+        Event::Pairing { key, result } => {
+            match result {
+                Ok(pairing) => {
+                    println!(
+                        "{key}: pairing file created ({:?})",
+                        pairing
+                    );
+                }
+
+                Err(error) => {
+                    eprintln!("{key}: pairing failed: {error}");
+                }
+            }
+        }
+
+        Event::Validation { key, result } => {
+            match result {
+                Ok(()) => {
+                    println!("{key}: pairing validation succeeded");
+                }
+
+                Err(error) => {
+                    eprintln!("{key}: pairing validation failed: {error}");
+                }
+            }
+        }
+
+        Event::Install {
+            key,
+            app,
+            result,
+        } => {
+            match result {
+                Ok(()) => {
+                    println!("{key}: installed pairing file into {app}");
+                }
+
+                Err(error) => {
+                    eprintln!("{key}: failed to install into {app}: {error}");
+                }
+            }
+        }
+
+        Event::Wireless(status) => {
+            match status {
+                backend::WirelessStatus::Advertising(name) => {
+                    println!("Wireless pairing: advertising as {name}");
+                }
+
+                backend::WirelessStatus::Connected => {
+                    println!("Wireless pairing: device connected");
+                }
+
+                backend::WirelessStatus::EnterPin(host) => {
+                    println!(
+                        "Wireless pairing: enter the PIN shown by {host}"
+                    );
+                }
+
+                backend::WirelessStatus::Pin(pin) => {
+                    println!("Wireless pairing PIN: {pin}");
+                }
+
+                backend::WirelessStatus::Paired(key) => {
+                    println!("Wireless pairing completed: {key}");
+                }
+
+                backend::WirelessStatus::Failed(error) => {
+                    eprintln!("Wireless pairing failed: {error}");
+                }
+            }
+        }
+    }
 }
