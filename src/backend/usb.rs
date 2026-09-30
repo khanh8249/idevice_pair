@@ -111,19 +111,20 @@ async fn listen(
 
     while let Some(event) = stream.next().await {
         match event? {
-            UsbmuxdListenEvent::Connected(_)
-            | UsbmuxdListenEvent::Disconnected(_) => {
-                debug!(
-                    "usbmuxd device event: {} ({:?})",
+            UsbmuxdListenEvent::Connected(device) => {
+                tracing::debug!(
+                    "usbmuxd device connected: {} ({:?})",
                     device.udid,
                     device.connection_type
                 );
 
-                // The receiver only needs to know that something
-                // changed; the worker performs a fresh enumeration.
-                if changes.send(()).is_err() {
-                    return Ok(());
-                }
+                changes.send(()).expect("device watcher stopped");
+            }
+
+            UsbmuxdListenEvent::Disconnected(_) => {
+                changes.send(()).expect("device watcher stopped");
+            }
+        }
             }
         }
     }
