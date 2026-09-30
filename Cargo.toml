@@ -19,11 +19,13 @@ idevice = { version = "0.1.68", features = [
     "usbmuxd",
 ] }
 
-tokio = { version = "1.53", features = [
+tokio = { version = "1", features = [
+    "macros",
     "rt-multi-thread",
-    "net",
     "sync",
     "time",
+    "net",
+    "signal",
 ] }
 
 futures-util = "0.3.33"
