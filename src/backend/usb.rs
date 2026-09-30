@@ -111,8 +111,8 @@ async fn listen(
 
     while let Some(event) = stream.next().await {
         match event? {
-            UsbmuxdListenEvent::Connected(device)
-            | UsbmuxdListenEvent::Disconnected(device) => {
+            UsbmuxdListenEvent::Connected(_)
+            | UsbmuxdListenEvent::Disconnected(_) => {
                 debug!(
                     "usbmuxd device event: {} ({:?})",
                     device.udid,
