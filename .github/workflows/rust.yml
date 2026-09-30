@@ -2,45 +2,36 @@ name: Build Android ARMv7
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  ANDROID_NDK_VERSION: 25.2.9519653
 
 jobs:
   build-armv7:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ---------- Cache Rust toolchain ----------
-      - name: Cache Rust Cargo
+      - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            ~/.cargo/bin/
-            ~/.rustup/
-            target/
-          key: rust-cargo-${{ runner.os }}-armv7-${{ hashFiles('**/Cargo.lock') }}
-aml          restore-keys: |
-            rust-cargo-${{ runner.os }}-armv7-
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-armv7-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-armv7-
 
-      # ---------- Cài đặt Rust ----------
-     
- - name: Install Rust toolchain
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets     : armv7-linux-androideabi
+          targets: armv7-linux-androideabi
 
-      # ---------- Cài đặt NDK ----------
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
@@ -48,25 +39,18 @@ aml          restore-keys: |
           ndk-version: r25b
           add-to-path: true
 
-      - name: Export NDK env
-        run: |
-          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
-
-      # ---------- Cài cargo-ndk ----------
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # ---------- Build ----------
-      - name: Build for ARMv7
+      - name: Build ARMv7
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: cargo ndk -t armeabi-v7a -o ./jniLibs build --release
 
-      # ---------- Upload artifact ----------
-      - name: Upload binary
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-armv7-binary
-          path: |
-            target/armv7-linux-androideabi/release/
-            jniLibs/armeabi-v7a/
+          path: jniLibs/armeabi-v7a/
           if-no-files-found: error
