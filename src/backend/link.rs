@@ -3,7 +3,7 @@ use std::sync::Arc;
 use idevice::{
     core_device_proxy::CoreDeviceProxy,
     lockdown::LockdownClient,
-    provider::{IdeviceProvider, UsbmuxdProvider},
+    provider::{IdeviceProvider, RsdProvider, UsbmuxdProvider},
     remote_pairing::{RemotePairingClient, RpPairingSocket},
     rsd::RsdHandshake,
     tcp::handle::AdapterHandle,
@@ -11,6 +11,7 @@ use idevice::{
     IdeviceError,
     IdeviceService,
     ReadWrite,
+    RsdService,
 };
 
 use tokio::{net::TcpStream, sync::Mutex};
@@ -97,7 +98,7 @@ impl Link {
 
     pub async fn service<T>(&mut self) -> Result<T, IdeviceError>
     where
-        T: IdeviceService,
+        T: IdeviceService + RsdService,
     {
         match self {
             Self::Usbmuxd { provider, .. } => {
@@ -145,8 +146,7 @@ impl Link {
         &mut self,
         privileged: bool,
     ) -> Result<LockdownClient, IdeviceError> {
-        let mut client =
-            self.service::<LockdownClient>().await?;
+        let mut client = self.service::<LockdownClient>().await?;
 
         if let Self::Usbmuxd {
             provider,
@@ -203,13 +203,11 @@ pub async fn device_info(
 ) -> Result<DeviceInfo, IdeviceError> {
     Ok(DeviceInfo {
         model: value(client, "ProductType").await?,
-
         version: format!(
             "{} ({})",
             value(client, "ProductVersion").await?,
             value(client, "BuildVersion").await?
         ),
-
         udid: value(client, "UniqueDeviceID").await?,
     })
 }
