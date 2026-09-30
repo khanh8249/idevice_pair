@@ -11,18 +11,24 @@ pub use install::InstalledApp;
 pub use pairing::{PairingKind, PairingResult};
 pub use worker::spawn;
 
-use std::{net::IpAddr, sync::OnceLock};
+use std::{
+    net::IpAddr,
+    sync::OnceLock,
+};
 
 use tokio::sync::mpsc::UnboundedSender;
 
+/// Generate a unique host label for this process.
 pub fn host_label() -> &'static str {
     static LABEL: OnceLock<String> = OnceLock::new();
+
     LABEL.get_or_init(|| {
         let id = uuid::Uuid::new_v4().simple().to_string();
         format!("idevice_pair-{}", &id[..6])
     })
 }
 
+/// Convert an error and its source chain into a readable string.
 pub fn message(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
@@ -37,32 +43,34 @@ pub fn message(error: &dyn std::error::Error) -> String {
 
 pub type DeviceKey = String;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Transport {
     Usb,
     Network,
     Remote,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DeviceSummary {
     pub key: DeviceKey,
     pub name: String,
     pub transport: Transport,
 }
 
+#[derive(Clone, Debug)]
 pub struct DeviceInfo {
     pub model: String,
     pub version: String,
     pub udid: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AppleTv {
     pub name: String,
-    address: discovery::Addresses,
+    pub(crate) address: discovery::Addresses,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Check {
     WirelessDebugging,
     DeveloperMode,
@@ -70,25 +78,33 @@ pub enum Check {
 
 pub enum Command {
     Inspect(DeviceKey),
+
     ListApps {
         key: DeviceKey,
         kind: PairingKind,
     },
+
     CreatePairing {
         key: DeviceKey,
         kind: PairingKind,
     },
+
     Validate {
         key: DeviceKey,
         ip: Option<IpAddr>,
     },
+
     Install {
         key: DeviceKey,
         app: InstalledApp,
     },
+
     StartWirelessPairing,
+
     PairAppleTv(AppleTv),
+
     SubmitWirelessPin(String),
+
     StopWirelessPairing,
 }
 
@@ -153,6 +169,8 @@ pub enum WirelessStatus {
     Failed(String),
 }
 
+/// Handle used by a frontend to send commands to the backend.
+#[derive(Clone)]
 pub struct Backend {
     commands: UnboundedSender<Command>,
 }
@@ -165,11 +183,10 @@ impl Backend {
     }
 }
 
-/// Event channel used by the backend.
+/// Event channel shared by the backend and any frontend.
 ///
-/// This type deliberately has no GUI dependency.
-/// GUI frontends can request a repaint after receiving events,
-/// while CLI frontends can simply consume the events directly.
+/// This type intentionally contains no GUI-specific state.
+/// CLI, GUI, TUI, daemon, or another frontend can consume these events.
 #[derive(Clone)]
 pub struct Events {
     sender: UnboundedSender<Event>,
@@ -179,7 +196,7 @@ impl Events {
     pub fn send(&self, event: Event) {
         self.sender
             .send(event)
-            .expect("event channel stopped");
+            .expect("frontend event channel stopped");
     }
 
     pub fn progress(&self, key: &DeviceKey, message: impl Into<String>) {
