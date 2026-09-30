@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 
 use idevice::{
+    IdeviceService,
     lockdown::LockdownClient,
     pairing_file::PairingFile,
     provider::IdeviceProvider,
