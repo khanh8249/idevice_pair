@@ -11,23 +11,46 @@ use idevice::{
     usbmuxd::{Connection, UsbmuxdDevice},
 };
 use tokio::sync::{
-    Mutex, OwnedMutexGuard,
+    Mutex,
+    OwnedMutexGuard,
     mpsc::{UnboundedReceiver, unbounded_channel},
     oneshot,
 };
 use tracing::debug;
 
 use super::{
-    AppleTv, Backend, Check, Command, DeviceKey, DeviceSummary, Event, Events, InstalledApp,
-    PairingKind, Transport, WirelessStatus, discovery, install,
+    AppleTv,
+    Backend,
+    Check,
+    Command,
+    DeviceKey,
+    DeviceSummary,
+    Event,
+    Events,
+    InstalledApp,
+    PairingKind,
+    Transport,
+    WirelessStatus,
+    discovery,
+    install,
     link::Link,
     pairing::{self, Payload},
-    usb, validate,
+    usb,
+    validate,
     wireless::{self, HostIdentity, WirelessDevice},
 };
 
 const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
+/// Start the device backend.
+///
+/// The backend is completely frontend-agnostic:
+/// - no egui
+/// - no eframe
+/// - no GUI context
+/// - no repaint callbacks
+///
+/// The caller receives a command handle and an event receiver.
 pub fn spawn() -> (Backend, UnboundedReceiver<Event>) {
     let (command_sender, mut commands) = unbounded_channel();
     let (event_sender, events) = unbounded_channel();
@@ -47,6 +70,7 @@ pub fn spawn() -> (Backend, UnboundedReceiver<Event>) {
             worker.clone().watch_usb();
 
             let events = worker.events.clone();
+
             tokio::spawn(discovery::watch_manual_pairing(move |devices| {
                 events.send(Event::AppleTvs(devices));
             }));
@@ -93,7 +117,9 @@ enum Source {
 impl Source {
     fn transport(&self) -> Transport {
         match self {
-            Self::Usbmuxd(device) if device.connection_type == Connection::Usb => Transport::Usb,
+            Self::Usbmuxd(device) if device.connection_type == Connection::Usb => {
+                Transport::Usb
+            }
             Self::Usbmuxd(_) => Transport::Network,
             Self::Remote(_) => Transport::Remote,
         }
@@ -122,6 +148,7 @@ impl State {
     ) -> Result<Link, IdeviceError> {
         match self.link().await? {
             link @ Link::Rsd { .. } => Ok(link),
+
             Link::Usbmuxd { provider, .. } => {
                 events.progress(key, "Opening a tunnel to the device");
                 Link::over_core_device(&provider).await
@@ -144,20 +171,45 @@ impl Worker {
     async fn handle(self: Arc<Self>, command: Command) {
         match command {
             Command::Inspect(key) => self.inspect(key).await,
-            Command::ListApps { key, kind } => self.list_apps(key, kind).await,
-            Command::CreatePairing { key, kind } => self.create_pairing(key, kind).await,
-            Command::Validate { key, ip } => self.validate(key, ip).await,
-            Command::Install { key, app } => self.install(key, app).await,
-            Command::StartWirelessPairing => self.start_wireless_pairing().await,
-            Command::PairAppleTv(id) => self.start_apple_tv_pairing(id).await,
-            Command::SubmitWirelessPin(pin) => self.submit_wireless_pin(pin).await,
-            Command::StopWirelessPairing => self.stop_wireless_pairing().await,
+
+            Command::ListApps { key, kind } => {
+                self.list_apps(key, kind).await;
+            }
+
+            Command::CreatePairing { key, kind } => {
+                self.create_pairing(key, kind).await;
+            }
+
+            Command::Validate { key, ip } => {
+                self.validate(key, ip).await;
+            }
+
+            Command::Install { key, app } => {
+                self.install(key, app).await;
+            }
+
+            Command::StartWirelessPairing => {
+                self.start_wireless_pairing().await;
+            }
+
+            Command::PairAppleTv(device) => {
+                self.start_apple_tv_pairing(device).await;
+            }
+
+            Command::SubmitWirelessPin(pin) => {
+                self.submit_wireless_pin(pin).await;
+            }
+
+            Command::StopWirelessPairing => {
+                self.stop_wireless_pairing().await;
+            }
         }
     }
 
     async fn refresh_devices(&self) {
         let attached = match usb::list().await {
             Ok(attached) => attached,
+
             Err(e) => {
                 self.events.send(Event::UsbmuxdFailure(text(e)));
                 return;
@@ -187,7 +239,10 @@ impl Worker {
 
         for device in attached {
             let key = muxer_key(&device.device);
-            let stored = usb::pair_record(&device.device.udid).await.is_ok();
+
+            let stored = usb::pair_record(&device.device.udid)
+                .await
+                .is_ok();
 
             self.events.send(Event::Info {
                 key: key.clone(),
@@ -210,8 +265,13 @@ impl Worker {
 
         let mut link = match state.link().await {
             Ok(link) => link,
+
             Err(e) => {
-                return self.check(&key, Check::DeveloperMode, Err(e));
+                return self.check(
+                    &key,
+                    Check::DeveloperMode,
+                    Err(e),
+                );
             }
         };
 
@@ -228,8 +288,16 @@ impl Worker {
         self.check(&key, Check::DeveloperMode, result);
 
         if transport == Transport::Usb {
-            let result = link.enable_wireless_debugging().await.map(|()| true);
-            self.check(&key, Check::WirelessDebugging, result);
+            let result = link
+                .enable_wireless_debugging()
+                .await
+                .map(|()| true);
+
+            self.check(
+                &key,
+                Check::WirelessDebugging,
+                result,
+            );
         }
     }
 
@@ -263,6 +331,7 @@ impl Worker {
                 state.pairing = Some(payload);
                 result
             }
+
             Err(e) => Err(e),
         };
 
@@ -282,8 +351,12 @@ impl Worker {
             PairingKind::Lockdown => {
                 match pairing::stored_lockdown_file(udid(key)).await {
                     Ok(file) => Ok(Payload::Lockdown(Box::new(file))),
+
                     Err(e) => {
-                        debug!("no stored pair record: {}", super::message(&e));
+                        debug!(
+                            "no stored pair record: {}",
+                            super::message(&e)
+                        );
 
                         let mut link = state.link().await?;
 
@@ -303,11 +376,16 @@ impl Worker {
                 if let Source::Remote(pairing_file) = &state.source {
                     Ok(Payload::Remote(pairing_file.clone()))
                 } else {
-                    let mut tunnel = state.tunnel(&self.events, key).await?;
+                    let mut tunnel =
+                        state.tunnel(&self.events, key).await?;
 
-                    pairing::remote_file(&mut tunnel, &self.events, key)
-                        .await
-                        .map(|file| Payload::Remote(Box::new(file)))
+                    pairing::remote_file(
+                        &mut tunnel,
+                        &self.events,
+                        key,
+                    )
+                    .await
+                    .map(|file| Payload::Remote(Box::new(file)))
                 }
             }
         }
@@ -326,8 +404,13 @@ impl Worker {
             Some(Payload::Remote(mut file)) => {
                 match state.tunnel(&self.events, &key).await {
                     Ok(mut tunnel) => {
-                        pairing::verify_remote(&mut tunnel, &mut file).await
+                        pairing::verify_remote(
+                            &mut tunnel,
+                            &mut file,
+                        )
+                        .await
                     }
+
                     Err(e) => Err(e),
                 }
             }
@@ -372,12 +455,19 @@ impl Worker {
         let worker = self.clone();
 
         self.start_pairing(async move {
-            wireless::accept_pairing(&worker.identity, &worker.events).await
+            wireless::accept_pairing(
+                &worker.identity,
+                &worker.events,
+            )
+            .await
         })
         .await;
     }
 
-    async fn start_apple_tv_pairing(self: &Arc<Self>, device: AppleTv) {
+    async fn start_apple_tv_pairing(
+        self: &Arc<Self>,
+        device: AppleTv,
+    ) {
         let worker = self.clone();
 
         self.start_pairing(async move {
@@ -385,8 +475,12 @@ impl Worker {
 
             *worker.wireless_pin.lock().await = Some(pin_sender);
 
-            let result =
-                wireless::pair_apple_tv(&worker.events, device.address, pin_receiver).await;
+            let result = wireless::pair_apple_tv(
+                &worker.events,
+                device.address,
+                pin_receiver,
+            )
+            .await;
 
             *worker.wireless_pin.lock().await = None;
 
@@ -397,8 +491,9 @@ impl Worker {
 
     async fn start_pairing(
         self: &Arc<Self>,
-        pairing: impl Future<Output = Result<WirelessDevice, IdeviceError>>
-            + Send
+        pairing: impl Future<
+                Output = Result<WirelessDevice, IdeviceError>,
+            > + Send
             + 'static,
     ) {
         let mut task = self.pairing_task.lock().await;
@@ -410,7 +505,9 @@ impl Worker {
         let worker = self.clone();
 
         *task = Some(tokio::spawn(async move {
-            worker.finish_wireless_pairing(pairing.await).await;
+            worker
+                .finish_wireless_pairing(pairing.await)
+                .await;
         }));
     }
 
@@ -422,13 +519,15 @@ impl Worker {
             Ok(device) => {
                 let key = self.add_wireless(device).await;
 
-                self.events
-                    .send(Event::Wireless(WirelessStatus::Paired(key)));
+                self.events.send(Event::Wireless(
+                    WirelessStatus::Paired(key),
+                ));
             }
 
             Err(e) => {
-                self.events
-                    .send(Event::Wireless(WirelessStatus::Failed(text(e))));
+                self.events.send(Event::Wireless(
+                    WirelessStatus::Failed(text(e)),
+                ));
             }
         }
 
@@ -446,12 +545,17 @@ impl Worker {
     }
 
     async fn submit_wireless_pin(&self, pin: String) {
-        if let Some(sender) = self.wireless_pin.lock().await.take() {
+        if let Some(sender) =
+            self.wireless_pin.lock().await.take()
+        {
             let _ = sender.send(pin);
         }
     }
 
-    async fn add_wireless(&self, device: WirelessDevice) -> DeviceKey {
+    async fn add_wireless(
+        &self,
+        device: WirelessDevice,
+    ) -> DeviceKey {
         let initial_pairing =
             Payload::Remote(Box::new(device.pairing_file.clone()));
 
@@ -459,7 +563,11 @@ impl Worker {
             .result(&device.udid)
             .map_err(text);
 
-        let device = Device::remote(device, initial_pairing);
+        let device = Device::remote(
+            device,
+            initial_pairing,
+        );
+
         let key = device.summary.key.clone();
 
         {
@@ -467,7 +575,10 @@ impl Worker {
 
             devices.insert(key.clone(), device);
 
-            send_devices(&self.events, &devices);
+            send_devices(
+                &self.events,
+                &devices,
+            );
         }
 
         self.events.send(Event::Pairing {
@@ -479,7 +590,8 @@ impl Worker {
     }
 
     fn watch_usb(self: Arc<Self>) {
-        let (change_sender, mut changes) = unbounded_channel();
+        let (change_sender, mut changes) =
+            unbounded_channel();
 
         std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
@@ -498,8 +610,18 @@ impl Worker {
         });
     }
 
-    async fn state(&self, key: &DeviceKey) -> Option<OwnedMutexGuard<State>> {
-        let state = self.devices.lock().await.get(key)?.state.clone();
+    async fn state(
+        &self,
+        key: &DeviceKey,
+    ) -> Option<OwnedMutexGuard<State>> {
+        let state =
+            self.devices
+                .lock()
+                .await
+                .get(key)?
+                .state
+                .clone();
+
         Some(state.lock_owned().await)
     }
 
@@ -531,7 +653,10 @@ impl Worker {
 }
 
 impl Device {
-    fn usbmuxd(name: String, device: UsbmuxdDevice) -> Self {
+    fn usbmuxd(
+        name: String,
+        device: UsbmuxdDevice,
+    ) -> Self {
         let key = muxer_key(&device);
         let source = Source::Usbmuxd(device);
 
@@ -546,7 +671,10 @@ impl Device {
         )
     }
 
-    fn remote(device: WirelessDevice, pairing: Payload) -> Self {
+    fn remote(
+        device: WirelessDevice,
+        pairing: Payload,
+    ) -> Self {
         let WirelessDevice {
             udid,
             name,
@@ -590,12 +718,18 @@ fn send_devices(
         .collect();
 
     summaries.sort_by_key(|device| {
-        (device.transport, device.name.to_lowercase())
+        (
+            device.transport,
+            device.name.to_lowercase(),
+        )
     });
 
     debug!(
         "devices: {:?}",
-        summaries.iter().map(|d| &d.key).collect::<Vec<_>>()
+        summaries
+            .iter()
+            .map(|device| &device.key)
+            .collect::<Vec<_>>()
     );
 
     events.send(Event::Devices(summaries));
@@ -603,8 +737,13 @@ fn send_devices(
 
 fn muxer_key(device: &UsbmuxdDevice) -> DeviceKey {
     match device.connection_type {
-        Connection::Usb => format!("usb:{}", device.udid),
-        _ => format!("net:{}", device.udid),
+        Connection::Usb => {
+            format!("usb:{}", device.udid)
+        }
+
+        _ => {
+            format!("net:{}", device.udid)
+        }
     }
 }
 
@@ -614,6 +753,6 @@ fn udid(key: &DeviceKey) -> &str {
         .1
 }
 
-fn text(e: IdeviceError) -> String {
-    super::message(&e)
+fn text(error: IdeviceError) -> String {
+    super::message(&error)
 }
