@@ -3,99 +3,68 @@ name: Build Android ARMv7
 on:
   push:
     branches:
-      - main
       - master
   workflow_dispatch:
 
 jobs:
   build:
-    name: Android ARMv7
     runs-on: ubuntu-24.04
 
     env:
-      CARGO_TERM_COLOR: always
-      NDK_VERSION: 27.3.13750724
+      NDK_VERSION: "27.3.13750724"
+      RUSTFLAGS: "-D warnings"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          target: armv7-linux-androideabi
+          targets: armv7-linux-androideabi
 
-      - name: Locate Android SDK
-        run: |
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}" >> "$GITHUB_ENV"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-          if [ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            echo "SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" >> "$GITHUB_ENV"
-          elif [ -x "$ANDROID_SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" ]; then
-            echo "SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" >> "$GITHUB_ENV"
-          else
-            echo "sdkmanager not found"
-            find "$ANDROID_SDK_ROOT" -name sdkmanager -type f -print
-            exit 1
-          fi
-
-      - name: Accept Android licenses
-        run: |
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-
-      - name: Install Android NDK
-        run: |
-          "$SDKMANAGER" \
-            "platform-tools" \
-            "platforms;android-24" \
-            "ndk;${NDK_VERSION}"
-
-      - name: Configure Android NDK
-        run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+      - name: Setup Android NDK
+        uses: android-actions/setup-ndk@v3
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
 
       - name: Install cargo-ndk
         run: |
-          cargo install cargo-ndk --locked
+          cargo install cargo-ndk --version 4.1.2 --locked
 
-      - name: Build ARMv7
+      - name: Verify toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo ndk --version
+          echo "ANDROID_NDK=$ANDROID_NDK"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+
+      - name: Build ARMv7 Android
         run: |
           cargo ndk \
             -t armeabi-v7a \
-            -p 24 \
-            build \
-            --release
-
-      - name: Verify binary
-        run: |
-          BIN="target/armv7-linux-androideabi/release/idevice_pair"
-
-          if [ ! -f "$BIN" ]; then
-            echo "Binary not found:"
-            find target -type f -perm -111 -print
-            exit 1
-          fi
-
-          file "$BIN"
-          ls -lh "$BIN"
+            --platform 24 \
+            build --release
 
       - name: Prepare artifact
         run: |
-          mkdir -p artifact
+          mkdir -p dist
 
           cp \
-            target/armv7-linux-androideabi/release/idevice_pair \
-            artifact/idevice_pair-armv7-android
+            target/armv7-linux-androideabi/release/idevice-pair \
+            dist/idevice-pair-armv7-android
 
-          chmod +x artifact/idevice_pair-armv7-android
+          chmod +x dist/idevice-pair-armv7-android
 
-      - name: Upload artifact
+          file dist/idevice-pair-armv7-android
+
+      - name: Upload ARMv7 binary
         uses: actions/upload-artifact@v4
         with:
-          name: idevice-pair-android-armv7
-          path: artifact/idevice_pair-armv7-android
+          name: idevice-pair-armv7-android
+          path: dist/idevice-pair-armv7-android
           if-no-files-found: error
