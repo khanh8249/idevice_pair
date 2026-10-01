@@ -36,29 +36,28 @@ jobs:
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r25b
+          ndk-version: r27
           add-to-path: true
 
+      - name: Verify NDK structure
+        run: |
+          echo "NDK path: ${{ steps.setup-ndk.outputs.ndk-path }}"
+          ls -la ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -20
+
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: cargo install cargo-ndk --version 4.0.3 --locked
 
       - name: Build ARMv7
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CLANG_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
           CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
         run: cargo ndk -t armeabi-v7a -o ./jniLibs --link-builtins build --release
-
-      - name: Strip binary
-        run: |
-          ND*K_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          find target/armv7-linux-androideabi/release -maxdepth 1 -type f -executable -name 'idevice_pair' -exec "$NDK_BIN/llvm-strip" {} \;
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-armv7-binary
-          path: |
-            target/armv7-linux-androideabi/release/idevice_pair
-            jniLibs/armeabi-v7a/
+          path: jniLibs/armeabi-v7a/
           if-no-files-found: error
