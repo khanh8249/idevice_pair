@@ -88,7 +88,6 @@ jobs:
           cargo ndk \
             -t ${{ matrix.ndk_target }} \
             --platform 24 \
-            -o ./jniLibs \
             --link-builtins \
             build --release
 
@@ -99,15 +98,7 @@ jobs:
       - name: Prepare artifact
         run: |
           mkdir -p dist
-          case "${{ matrix.target }}" in
-            *android*)
-              cp target/${{ matrix.target }}/release/idevice_pair dist/idevice_pair 2>/dev/null || \
-              cp jniLibs/${{ matrix.ndk_target }}/idevice_pair dist/idevice_pair
-              ;;
-            *)
-              cp target/${{ matrix.target }}/release/idevice_pair dist/idevice_pair
-              ;;
-          esac
+          cp target/${{ matrix.target }}/release/idevice_pair dist/idevice_pair
           chmod +x dist/idevice_pair
           file dist/idevice_pair
           ls -lh dist/
