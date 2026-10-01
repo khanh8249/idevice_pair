@@ -9,17 +9,14 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_NDK_PLATFORM: 24
 
 jobs:
   build-armv7:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Cache Cargo
+      - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
@@ -37,45 +34,31 @@ jobs:
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
-        id: ndk
+        id: setup-ndk
         with:
-          ndk-version: r27c
+          ndk-version: r25b
           add-to-path: true
 
-      - name: Configure Android toolchain
-        run: |
-          echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
-
-          echo "NDK_PATH=${{ steps.ndk.outputs.ndk-path }}"
-
-          ls -la "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin" | head
-
       - name: Install cargo-ndk
-        run: |
-          cargo install cargo-ndk --version 4.1.2 --locked
+        run: cargo install cargo-ndk --locked
 
       - name: Build ARMv7
-        run: |
-          cargo ndk \
-            -t armeabi-v7a \
-            -p 24 \
-            build --release
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
+        run: cargo ndk -t armeabi-v7a -o ./jniLibs --link-builtins build --release
 
       - name: Strip binary
         run: |
-          "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
-            target/armv7-linux-androideabi/release/idevice_pair
-
-      - name: Prepare artifact
-        run: |
-          mkdir -p dist
-          cp target/armv7-linux-androideabi/release/idevice_pair dist/
-          file dist/idevice_pair
+          ND*K_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          find target/armv7-linux-androideabi/release -maxdepth 1 -type f -executable -name 'idevice_pair' -exec "$NDK_BIN/llvm-strip" {} \;
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: idevice-pair-android-armv7
-          path: dist/idevice_pair
+          name: android-armv7-binary
+          path: |
+            target/armv7-linux-androideabi/release/idevice_pair
+            jniLibs/armeabi-v7a/
           if-no-files-found: error
