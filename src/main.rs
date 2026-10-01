@@ -43,7 +43,6 @@ struct PairingInfo {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    // Khởi tạo tracing (chỉ log ra stderr để không phá TUI)
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -57,13 +56,11 @@ async fn main() -> Result<()> {
     let (backend, events) = backend::spawn();
     let state = Arc::new(RwLock::new(AppState::default()));
 
-    // Spawn task xử lý events từ backend và cập nhật shared state
     let event_task = tokio::spawn(event_loop(events, state.clone()));
 
-    // Đợi một chút để backend discover devices lần đầu
+    // Đợi backend discover devices lần đầu
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    // Main loop: hiển thị menu
     let result = main_menu(backend.clone(), state.clone()).await;
 
     event_task.abort();
@@ -272,7 +269,10 @@ async fn event_loop(
                     );
                 }
                 WirelessStatus::Connected => {
-                    eprintln!("{} device connected", style("[wireless]").magenta().bold());
+                    eprintln!(
+                        "{} device connected",
+                        style("[wireless]").magenta().bold()
+                    );
                 }
                 WirelessStatus::EnterPin(host) => {
                     eprintln!(
@@ -332,7 +332,7 @@ enum Action {
 async fn main_menu(backend: backend::Backend, state: Arc<RwLock<AppState>>) -> Result<()> {
     loop {
         println!();
-        let choice = Select::new(
+        let choice = match Select::new(
             "Chọn hành động:",
             vec![
                 "📱  Pair device (Lockdown — iOS 16)",
@@ -349,7 +349,12 @@ async fn main_menu(backend: backend::Backend, state: Arc<RwLock<AppState>>) -> R
         )
         .with_page_size(12)
         .prompt()
-        .context("menu cancelled")?;
+        {
+            Ok(c) => c,
+            Err(inquire::InquireError::OperationInterrupted) => break,
+            Err(inquire::InquireError::OperationCanceled) => break,
+            Err(e) => return Err(e.into()),
+        };
 
         let action = match choice {
             s if s.starts_with("📱  Pair device (Lockdown") => Action::PairLockdown,
@@ -495,19 +500,19 @@ async fn do_pair(
     }
 
     println!(
-        "\n{} Đang pair... (theo dõi prompt \"Trust\" trên iPhone)\n",
+        "\n{} Đang pair... (theo dõi prompt \"Trust\"` trên iPhone)\n",
         style("→").cyan().bold()
     );
 
     backend.send(Command::CreatePairing {
         key: device.key,
         kind,
-    });
+    là });
 
-    // Đợi 1 chút để event loop in progress
+    // Đợi event loop in progress
     tokio::time::sleep(Duration::from_secs(30)).await;
 
-    Ok(())
+    để Ok(())
 }
 
 async fn do_validate(
@@ -551,7 +556,6 @@ async fn do_install_apps(
     let device = pick_device(state).await?;
     let key = device.key.clone();
 
-    // Nếu chưa có cache apps → list trước
     let apps = {
         let s = state.read().await;
         s.last_apps.get(&key).cloned()
@@ -563,24 +567,24 @@ async fn do_install_apps(
             println!(
                 "\n{} Chưa có danh sách apps, đang list...\n",
                 style("→").cyan().bold()
- state            );
+            );
             backend.send(Command::ListApps {
                 key: key.clone(),
                 kind: PairingKind::Lockdown,
             });
-           : tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
 
             let s = state.read().await;
-            s.last &_apps.get(&key).cloned().unwrap_or_default()
+            s.last_apps.get(&key).cloned().unwrap_or_default()
         }
     };
 
     if apps.is_empty() {
-        anyhow::bailArc!("Không tìm thấy app nào hỗ trợ pairing file.");
+        anyhow::bail!("Không tìm thấy app nào hỗ trợ pairing file.");
     }
 
     let choices: Vec<String> = apps
-       <R .iter()
+        .iter()
         .map(|a| format!("{} ({})", a.name, a.bundle_id))
         .collect();
 
@@ -615,13 +619,12 @@ async fn do_install_apps(
 
 async fn do_wireless_accept(backend: &backend::Backend) -> Result<()> {
     println!(
-        "\n{} Bắt đầu wireless pairing... (Ctrl+C để dừng)\n",
+        "\n{} Bắt đầu wireless pairing... (nhấn Enter để dừng)\n",
         style("→").cyan().bold()
     );
 
     backend.send(Command::StartWirelessPairing);
 
-    // Đợi cho đến khi user nhấn Enter
     let _ = tokio::task::spawn_blocking(|| {
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf).ok();
@@ -634,7 +637,7 @@ async fn do_wireless_accept(backend: &backend::Backend) -> Result<()> {
 
 async fn do_wireless_apple_tv(
     backend: &backend::Backend,
-   wLock<AppState>>,
+    state: &Arc<RwLock<AppState>>,
 ) -> Result<()> {
     let tvs = state.read().await.apple_tvs.clone();
 
