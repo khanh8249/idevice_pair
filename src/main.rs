@@ -1,5 +1,4 @@
 mod backend;
-mod cache;
 mod known_apps;
 
 use std::{
@@ -12,13 +11,11 @@ use anyhow::{Context, Result};
 use console::style;
 use inquire::{Confirm, MultiSelect, Select};
 use tokio::sync::{mpsc::UnboundedReceiver, RwLock};
-use tracing::warn;
 
 use backend::{
     AppleTv, Check, Command, DeviceSummary, Event, InstalledApp, PairingKind,
     Transport, WirelessStatus,
 };
-use cache::Cache;
 
 // =============================================================================
 // Shared state
@@ -195,59 +192,12 @@ async fn event_loop(
 
                     let mut s = state.write().await;
                     s.last_pairing.insert(
-                        key.clone(),
+                        key,
                         PairingInfo {
-                            file_name: pairing.file_name.clone(),
-                            bytes: pairing.bytes.clone(),
+                            file_name: pairing.file_name,
+                            bytes: pairing.bytes,
                         },
                     );
-
-                    let device_name = s
-                        .devices
-                        .iter()
-                        .find(|d| d.key == key)
-                        .map(|d| d.name.clone())
-                        .unwrap_or_else(|| "unknown".into());
-
-                    let ios_version = s
-                        .device_info
-                        .get(&key)
-                        .map(|m| m.ios_version.clone())
-                        .unwrap_or_else(|| "unknown".into());
-
-                    let udid = key
-                        .split_once(':')
-                        .map(|(_, u)| u)
-                        .unwrap_or(&key)
-                        .to_string();
-
-                    let kind = if pairing.file_name == "pairingFile.plist" {
-                        PairingKind::Remote
-                    } else {
-                        PairingKind::Lockdown
-                    };
-
-                    drop(s);
-
-                    if let Ok(cache) = Cache::open() {
-                        if let Err(error) = cache.save(
-                            &key,
-                            kind,
-                            &pairing.bytes,
-                            &udid,
-                            &pairing.file_name,
-                            &device_name,
-                            &ios_version,
-                        ) {
-                            warn!("failed to cache pairing: {error}");
-                        } else {
-                            eprintln!(
-                                "{} cached pairing for {}",
-                                style("[cache]").dim().green(),
-                                style(&device_name).cyan()
-                            );
-                        }
-                    }
                 }
                 Err(error) => {
                     eprintln!(
@@ -396,8 +346,7 @@ enum Action {
     WirelessAppleTv,
     ShowDevices,
     SavePairingFile,
-    LoadFromCache,
-    ClearCache,
+    PairingRecordInfo,
     Exit,
 }
 
@@ -419,9 +368,8 @@ async fn main_menu(
                 "Wireless pairing (accept)",
                 "Pair Apple TV",
                 "Show connected devices",
+                "Show pairing record info",
                 "Save last pairing file to disk",
-                "Load pairing from cache",
-                "Clear pairing cache",
                 "Exit",
             ],
         )
@@ -443,9 +391,8 @@ async fn main_menu(
             s if s.starts_with("Wireless pairing") => Action::WirelessAccept,
             s if s.starts_with("Pair Apple TV") => Action::WirelessAppleTv,
             s if s.starts_with("Show connected") => Action::ShowDevices,
+            s if s.starts_with("Show pairing record") => Action::PairingRecordInfo,
             s if s.starts_with("Save last") => Action::SavePairingFile,
-            s if s.starts_with("Load pairing") => Action::LoadFromCache,
-            s if s.starts_with("Clear pairing") => Action::ClearCache,
             _ => Action::Exit,
         };
 
@@ -453,6 +400,10 @@ async fn main_menu(
             Action::Exit => break,
             Action::ShowDevices => {
                 show_devices(&state).await;
+                Ok(())
+            }
+            Action::PairingRecordInfo => {
+                show_pairing_records(&state).await;
                 Ok(())
             }
             Action::PairLockdown => {
@@ -467,8 +418,6 @@ async fn main_menu(
             Action::WirelessAccept => do_wireless_accept(&backend).await,
             Action::WirelessAppleTv => do_wireless_apple_tv(&backend, &state).await,
             Action::SavePairingFile => do_save_pairing(&state).await,
-            Action::LoadFromCache => do_load_from_cache(&state).await,
-            Action::ClearCache => do_clear_cache().await,
         };
 
         if let Err(error) = result {
@@ -530,6 +479,14 @@ fn transport_label(t: Transport) -> &'static str {
     }
 }
 
+fn lockdown_dir() -> std::path::PathBuf {
+    if let Ok(prefix) = std::env::var("PREFIX") {
+        return std::path::PathBuf::from(prefix).join("var/lib/lockdown");
+    }
+
+    std::path::PathBuf::from("/var/lib/lockdown")
+}
+
 // =============================================================================
 // Actions
 // =============================================================================
@@ -557,6 +514,52 @@ async fn show_devices(state: &Arc<RwLock<AppState>>) {
         for tv in &s.apple_tvs {
             println!("  - {}", style(&tv.name).cyan());
         }
+    }
+}
+
+async fn show_pairing_records(state: &Arc<RwLock<AppState>>) {
+    let s = state.read().await;
+
+    if s.devices.is_empty() {
+        println!("{}", style("No device detected.").yellow());
+        return;
+    }
+
+    let dir = lockdown_dir();
+    println!();
+    println!("{}", style("Pairing records:").bold());
+    println!(
+        "  Directory: {}",
+        style(dir.display()).dim()
+    );
+    println!();
+
+    for d in &s.devices {
+        let udid = d.key.split_once(':').map(|(_, u)| u).unwrap_or(&d.key);
+        let path = dir.join(format!("{udid}.plist"));
+
+        let (status, extra) = if path.exists() {
+            let size = std::fs::metadata(&path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            (
+                style("available").green().to_string(),
+                format!("({} bytes)", size),
+            )
+        } else {
+            (
+                style("missing").yellow().to_string(),
+                String::new(),
+            )
+        };
+
+        println!(
+            "  - {} [{}]: {} {}",
+            style(&d.name).cyan(),
+            transport_label(d.transport),
+            status,
+            style(extra).dim()
+        );
     }
 }
 
@@ -786,88 +789,6 @@ async fn do_save_pairing(state: &Arc<RwLock<AppState>>) -> Result<()> {
         style("OK").green().bold(),
         style(&filename).cyan(),
         info.bytes.len()
-    );
-
-    Ok(())
-}
-
-async fn do_load_from_cache(state: &Arc<RwLock<AppState>>) -> Result<()> {
-    let cache = Cache::open()?;
-    let entries = cache.list()?;
-
-    if entries.is_empty() {
-        anyhow::bail!("Cache is empty. No paired device yet.");
-    }
-
-    let labels: Vec<String> = entries
-        .iter()
-        .map(|m| {
-            format!(
-                "{} [{}] {} (iOS {})",
-                m.device_name,
-                match m.kind {
-                    cache::PairingKindMeta::Lockdown => "Lockdown",
-                    cache::PairingKindMeta::Remote => "Remote",
-                },
-                m.udid,
-                m.ios_version
-            )
-        })
-        .collect();
-
-    let choice = Select::new("Select pairing file from cache:", labels)
-        .with_page_size(10)
-        .prompt()?;
-
-    let idx = labels
-        .iter()
-        .position(|l| l == &choice)
-        .context("cache entry not found")?;
-
-    let meta = &entries[idx];
-    let kind = match meta.kind {
-        cache::PairingKindMeta::Lockdown => PairingKind::Lockdown,
-        cache::PairingKindMeta::Remote => PairingKind::Remote,
-    };
-
-    let bytes = cache
-        .load(&meta.key, kind)?
-        .context("cache file missing")?;
-
-    let mut s = state.write().await;
-    s.last_pairing.insert(
-        meta.key.clone(),
-        PairingInfo {
-            file_name: meta.file_name.clone(),
-            bytes: bytes.clone(),
-        },
-    );
-
-    println!(
-        "\n{} Loaded pairing from cache for {} ({} bytes)\n",
-        style("OK").green().bold(),
-        style(&meta.device_name).cyan(),
-        bytes.len()
-    );
-
-    Ok(())
-}
-
-async fn do_clear_cache() -> Result<()> {
-    let confirm = Confirm::new("Clear all pairing cache?")
-        .with_default(false)
-        .prompt()?;
-
-    if !confirm {
-        return Ok(());
-    }
-
-    let cache = Cache::open()?;
-    cache.clear()?;
-
-    println!(
-        "\n{} Cache cleared\n",
-        style("OK").green().bold()
     );
 
     Ok(())
