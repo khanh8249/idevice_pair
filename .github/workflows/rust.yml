@@ -1,59 +1,151 @@
-name: Build Android ARMv7
+name: Build idevice_pair
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  build-armv7:
+  build:
+    name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Android
+          - target: armv7-linux-androideabi
+            name: android-armv7
+            artifact: idevice_pair-android-armv7
+            ndk_target: armeabi-v7a
+          - target: aarch64-linux-android
+            name: android-arm64
+            artifact: idevice_pair-android-arm64
+            ndk_target: arm64-v8a
+
+          # Linux
+          - target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+            artifact: idevice_pair-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            name: linux-arm64
+            artifact: idevice_pair-linux-arm64
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-armv7-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-armv7-
-
-      - name: Install Rust
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: armv7-linux-androideabi
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install system deps (Linux + Android)
+        if: contains(matrix.target, 'linux-gnu') || contains(matrix.target, 'android')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev cmake nasm \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Setup cross-linker (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> $GITHUB_ENV
+
+      - name: Install cargo-ndk (Android)
+        if: contains(matrix.target, 'android')
+        run: cargo install cargo-ndk
 
       - name: Setup Android NDK
+        if: contains(matrix.target, 'android')
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r27
+          ndk-version: r26b
           add-to-path: true
 
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --version 4.0.3 --locked
-
-      - name: Install build tools for aws-lc-sys
-        run: sudo apt-get update && sudo apt-get install -y cmake nasm
-
-      - name: Build ARMv7
+      - name: Build (Android)
+        if: contains(matrix.target, 'android')
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo ndk -t armeabi-v7a -o ./jniLibs --link-builtins build --release
+        run: |
+          cargo ndk \
+            -t ${{ matrix.ndk_target }} \
+            -o ./jniLibs \
+            --link-builtins \
+            build --release \
+            --target ${{ matrix.target }}
+
+      - name: Build (Linux)
+        if: contains(matrix.target, 'linux-gnu')
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p dist
+          case "${{ matrix.target }}" in
+            *android*)
+              cp target/${{ matrix.target }}/release/idevice_pair dist/idevice_pair 2>/dev/null || \
+              cp jniLibs/${{ matrix.ndk_target }}/idevice_pair dist/idevice_pair
+              ;;
+            *)
+              cp target/${{ matrix.target }}/release/idevice_pair dist/idevice_pair
+              ;;
+          esac
+          chmod +x dist/idevice_pair
+          file dist/idevice_pair
+          ls -lh dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-armv7-binary
-          path: jniLibs/armeabi-v7a/
+          name: ${{ matrix.artifact }}
+          path: dist/idevice_pair
           if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            cp "$dir/idevice_pair" "release/$name"
+            chmod +x "release/$name"
+          done
+          ls -lh release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
