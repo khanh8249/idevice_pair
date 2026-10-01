@@ -1,4 +1,5 @@
 mod backend;
+mod cache;
 mod known_apps;
 
 use std::{
@@ -11,24 +12,31 @@ use anyhow::{Context, Result};
 use console::style;
 use inquire::{Confirm, MultiSelect, Select};
 use tokio::sync::{mpsc::UnboundedReceiver, RwLock};
+use tracing::warn;
 
 use backend::{
     AppleTv, Check, Command, DeviceSummary, Event, InstalledApp, PairingKind,
     Transport, WirelessStatus,
 };
+use cache::Cache;
 
 // =============================================================================
-// Shared state — cập nhật realtime từ backend events
+// Shared state
 // =============================================================================
 
 #[derive(Default)]
 struct AppState {
     devices: Vec<DeviceSummary>,
     apple_tvs: Vec<AppleTv>,
-    /// Cache kết quả ListApps gần nhất, key = device key
     last_apps: HashMap<String, Vec<InstalledApp>>,
-    /// Cache pairing file vừa tạo, key = device key
     last_pairing: HashMap<String, PairingInfo>,
+    device_info: HashMap<String, DeviceMeta>,
+}
+
+#[derive(Clone, Default)]
+struct DeviceMeta {
+    model: String,
+    ios_version: String,
 }
 
 #[derive(Clone)]
@@ -58,7 +66,6 @@ async fn main() -> Result<()> {
 
     let event_task = tokio::spawn(event_loop(events, state.clone()));
 
-    // Đợi backend discover devices lần đầu
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     let result = main_menu(backend.clone(), state.clone()).await;
@@ -83,7 +90,7 @@ fn print_banner() {
 }
 
 // =============================================================================
-// Event loop — chạy song song với menu
+// Event loop
 // =============================================================================
 
 async fn event_loop(
@@ -105,16 +112,25 @@ async fn event_loop(
             Event::Info { key, result } => match result {
                 Ok(info) => {
                     eprintln!(
-                        "{} {} — {} — iOS {}",
+                        "{} {} - {} - iOS {}",
                         style("[info]").dim(),
                         style(&key).cyan(),
                         info.model,
                         info.version
                     );
+
+                    let mut s = state.write().await;
+                    s.device_info.insert(
+                        key,
+                        DeviceMeta {
+                            model: info.model,
+                            ios_version: info.version,
+                        },
+                    );
                 }
                 Err(error) => {
                     eprintln!(
-                        "{} {} — {}",
+                        "{} {} - {}",
                         style("[info]").dim(),
                         style(&key).cyan(),
                         style(error).red()
@@ -137,7 +153,7 @@ async fn event_loop(
                     Err(e) => style(e).red().to_string(),
                 };
                 eprintln!(
-                    "{} {} — {}: {}",
+                    "{} {} - {}: {}",
                     style("[check]").dim(),
                     style(&key).cyan(),
                     name,
@@ -152,7 +168,7 @@ async fn event_loop(
                     style("missing").yellow()
                 };
                 eprintln!(
-                    "{} {} — pairing record: {}",
+                    "{} {} - pairing record: {}",
                     style("[record]").dim(),
                     style(&key).cyan(),
                     status
@@ -161,7 +177,7 @@ async fn event_loop(
 
             Event::Progress { key, message } => {
                 eprintln!(
-                    "{} {} — {}",
+                    "{} {} - {}",
                     style("[progress]").dim(),
                     style(&key).cyan(),
                     style(message).italic()
@@ -171,7 +187,7 @@ async fn event_loop(
             Event::Pairing { key, result } => match result {
                 Ok(pairing) => {
                     eprintln!(
-                        "{} {} — pairing created: {}",
+                        "{} {} - pairing created: {}",
                         style("[pairing]").dim(),
                         style(&key).cyan(),
                         style(&pairing.file_name).green().bold()
@@ -179,16 +195,63 @@ async fn event_loop(
 
                     let mut s = state.write().await;
                     s.last_pairing.insert(
-                        key,
+                        key.clone(),
                         PairingInfo {
-                            file_name: pairing.file_name,
-                            bytes: pairing.bytes,
+                            file_name: pairing.file_name.clone(),
+                            bytes: pairing.bytes.clone(),
                         },
                     );
+
+                    let device_name = s
+                        .devices
+                        .iter()
+                        .find(|d| d.key == key)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_else(|| "unknown".into());
+
+                    let ios_version = s
+                        .device_info
+                        .get(&key)
+                        .map(|m| m.ios_version.clone())
+                        .unwrap_or_else(|| "unknown".into());
+
+                    let udid = key
+                        .split_once(':')
+                        .map(|(_, u)| u)
+                        .unwrap_or(&key)
+                        .to_string();
+
+                    let kind = if pairing.file_name == "pairingFile.plist" {
+                        PairingKind::Remote
+                    } else {
+                        PairingKind::Lockdown
+                    };
+
+                    drop(s);
+
+                    if let Ok(cache) = Cache::open() {
+                        if let Err(error) = cache.save(
+                            &key,
+                            kind,
+                            &pairing.bytes,
+                            &udid,
+                            &pairing.file_name,
+                            &device_name,
+                            &ios_version,
+                        ) {
+                            warn!("failed to cache pairing: {error}");
+                        } else {
+                            eprintln!(
+                                "{} cached pairing for {}",
+                                style("[cache]").dim().green(),
+                                style(&device_name).cyan()
+                            );
+                        }
+                    }
                 }
                 Err(error) => {
                     eprintln!(
-                        "{} {} — {}",
+                        "{} {} - {}",
                         style("[pairing]").dim(),
                         style(&key).cyan(),
                         style(error).red()
@@ -199,7 +262,7 @@ async fn event_loop(
             Event::Validation { key, result } => match result {
                 Ok(()) => {
                     eprintln!(
-                        "{} {} — validation {}",
+                        "{} {} - validation {}",
                         style("[validate]").dim(),
                         style(&key).cyan(),
                         style("succeeded").green().bold()
@@ -207,7 +270,7 @@ async fn event_loop(
                 }
                 Err(error) => {
                     eprintln!(
-                        "{} {} — validation failed: {}",
+                        "{} {} - validation failed: {}",
                         style("[validate]").dim(),
                         style(&key).cyan(),
                         style(error).red()
@@ -218,13 +281,16 @@ async fn event_loop(
             Event::Apps { key, result } => match result {
                 Ok(apps) => {
                     eprintln!(
-                        "{} {} — {} supported apps",
+                        "{} {} - {} supported apps",
                         style("[apps]").dim(),
                         style(&key).cyan(),
                         style(apps.len()).green().bold()
                     );
                     for app in &apps {
-                        eprintln!("           • {} ({})", app.name, app.bundle_id);
+                        eprintln!(
+                            "           - {} ({})",
+                            app.name, app.bundle_id
+                        );
                     }
 
                     let mut s = state.write().await;
@@ -232,7 +298,7 @@ async fn event_loop(
                 }
                 Err(error) => {
                     eprintln!(
-                        "{} {} — {}",
+                        "{} {} - {}",
                         style("[apps]").dim(),
                         style(&key).cyan(),
                         style(error).red()
@@ -243,7 +309,7 @@ async fn event_loop(
             Event::Install { key, app, result } => match result {
                 Ok(()) => {
                     eprintln!(
-                        "{} {} — installed into {}",
+                        "{} {} - installed into {}",
                         style("[install]").dim(),
                         style(&key).cyan(),
                         style(&app).green().bold()
@@ -251,7 +317,7 @@ async fn event_loop(
                 }
                 Err(error) => {
                     eprintln!(
-                        "{} {} — install into {} failed: {}",
+                        "{} {} - install into {} failed: {}",
                         style("[install]").dim(),
                         style(&key).cyan(),
                         &app,
@@ -305,14 +371,18 @@ async fn event_loop(
             },
 
             Event::UsbmuxdFailure(error) => {
-                eprintln!("{} {}", style("[usbmuxd]").red().bold(), error);
+                eprintln!(
+                    "{} {}",
+                    style("[usbmuxd]").red().bold(),
+                    error
+                );
             }
         }
     }
 }
 
 // =============================================================================
-// Menu chính
+// Menu
 // =============================================================================
 
 #[derive(Clone, Copy, PartialEq)]
@@ -326,28 +396,36 @@ enum Action {
     WirelessAppleTv,
     ShowDevices,
     SavePairingFile,
+    LoadFromCache,
+    ClearCache,
     Exit,
 }
 
-async fn main_menu(backend: backend::Backend, state: Arc<RwLock<AppState>>) -> Result<()> {
+async fn main_menu(
+    backend: backend::Backend,
+    state: Arc<RwLock<AppState>>,
+) -> Result<()> {
     loop {
         println!();
+
         let choice = match Select::new(
-            "Chọn hành động:",
+            "Select action:",
             vec![
-                "📱  Pair device (Lockdown — iOS 16)",
-                "📱  Pair device (Remote — iOS 17.4+)",
-                "✓   Validate pairing",
-                "📋  List supported apps",
-                "📥  Install pairing file into app",
-                "📡  Wireless pairing (accept)",
-                "📺  Pair Apple TV",
-                "🔍  Show connected devices",
-                "💾  Save last pairing file to disk",
-                "🚪  Exit",
+                "Pair device (Lockdown - iOS 16)",
+                "Pair device (Remote - iOS 17.4+)",
+                "Validate pairing",
+                "List supported apps",
+                "Install pairing file into app",
+                "Wireless pairing (accept)",
+                "Pair Apple TV",
+                "Show connected devices",
+                "Save last pairing file to disk",
+                "Load pairing from cache",
+                "Clear pairing cache",
+                "Exit",
             ],
         )
-        .with_page_size(12)
+        .with_page_size(14)
         .prompt()
         {
             Ok(c) => c,
@@ -357,15 +435,17 @@ async fn main_menu(backend: backend::Backend, state: Arc<RwLock<AppState>>) -> R
         };
 
         let action = match choice {
-            s if s.starts_with("📱  Pair device (Lockdown") => Action::PairLockdown,
-            s if s.starts_with("📱  Pair device (Remote") => Action::PairRemote,
-            s if s.starts_with("✓") => Action::Validate,
-            s if s.starts_with("📋") => Action::ListApps,
-            s if s.starts_with("📥") => Action::InstallApps,
-            s if s.starts_with("📡") => Action::WirelessAccept,
-            s if s.starts_with("📺") => Action::WirelessAppleTv,
-            s if s.starts_with("🔍") => Action::ShowDevices,
-            s if s.starts_with("💾") => Action::SavePairingFile,
+            s if s.starts_with("Pair device (Lockdown") => Action::PairLockdown,
+            s if s.starts_with("Pair device (Remote") => Action::PairRemote,
+            s if s.starts_with("Validate") => Action::Validate,
+            s if s.starts_with("List supported") => Action::ListApps,
+            s if s.starts_with("Install") => Action::InstallApps,
+            s if s.starts_with("Wireless pairing") => Action::WirelessAccept,
+            s if s.starts_with("Pair Apple TV") => Action::WirelessAppleTv,
+            s if s.starts_with("Show connected") => Action::ShowDevices,
+            s if s.starts_with("Save last") => Action::SavePairingFile,
+            s if s.starts_with("Load pairing") => Action::LoadFromCache,
+            s if s.starts_with("Clear pairing") => Action::ClearCache,
             _ => Action::Exit,
         };
 
@@ -378,26 +458,30 @@ async fn main_menu(backend: backend::Backend, state: Arc<RwLock<AppState>>) -> R
             Action::PairLockdown => {
                 do_pair(&backend, &state, PairingKind::Lockdown).await
             }
-            Action::PairRemote => do_pair(&backend, &state, PairingKind::Remote).await,
+            Action::PairRemote => {
+                do_pair(&backend, &state, PairingKind::Remote).await
+            }
             Action::Validate => do_validate(&backend, &state).await,
             Action::ListApps => do_list_apps(&backend, &state).await,
             Action::InstallApps => do_install_apps(&backend, &state).await,
             Action::WirelessAccept => do_wireless_accept(&backend).await,
             Action::WirelessAppleTv => do_wireless_apple_tv(&backend, &state).await,
             Action::SavePairingFile => do_save_pairing(&state).await,
+            Action::LoadFromCache => do_load_from_cache(&state).await,
+            Action::ClearCache => do_clear_cache().await,
         };
 
         if let Err(error) = result {
-            eprintln!("\n{} {}", style("✗").red().bold(), error);
+            eprintln!("\n{} {}", style("ERROR:").red().bold(), error);
         }
     }
 
-    println!("\n{}", style("Goodbye 👋").dim());
+    println!("\n{}", style("Goodbye").dim());
     Ok(())
 }
 
 // =============================================================================
-// Helper chọn device
+// Helpers
 // =============================================================================
 
 async fn pick_device(state: &Arc<RwLock<AppState>>) -> Result<DeviceSummary> {
@@ -405,7 +489,7 @@ async fn pick_device(state: &Arc<RwLock<AppState>>) -> Result<DeviceSummary> {
 
     if devices.is_empty() {
         anyhow::bail!(
-            "Chưa có device nào được phát hiện. Cắm iPhone qua USB và đợi vài giây."
+            "No device detected. Connect an iPhone via USB and wait a moment."
         );
     }
 
@@ -421,7 +505,7 @@ async fn pick_device(state: &Arc<RwLock<AppState>>) -> Result<DeviceSummary> {
         })
         .collect();
 
-    let choice = Select::new("Chọn device:", labels)
+    let choice = Select::new("Select device:", labels)
         .with_page_size(10)
         .prompt()?;
 
@@ -435,7 +519,7 @@ async fn pick_device(state: &Arc<RwLock<AppState>>) -> Result<DeviceSummary> {
                 d.key
             ) == choice
         })
-        .context("device không còn tồn tại")
+        .context("device no longer exists")
 }
 
 fn transport_label(t: Transport) -> &'static str {
@@ -455,12 +539,12 @@ async fn show_devices(state: &Arc<RwLock<AppState>>) {
 
     println!();
     if s.devices.is_empty() {
-        println!("{}", style("Không có device nào.").yellow());
+        println!("{}", style("No devices.").yellow());
     } else {
         println!("{}", style("Devices:").bold());
         for d in &s.devices {
             println!(
-                "  • {} [{}] {}",
+                "  - {} [{}] {}",
                 style(&d.name).cyan(),
                 transport_label(d.transport),
                 style(&d.key).dim()
@@ -471,7 +555,7 @@ async fn show_devices(state: &Arc<RwLock<AppState>>) {
     if !s.apple_tvs.is_empty() {
         println!("\n{}", style("Apple TVs (Remote Pairing):").bold());
         for tv in &s.apple_tvs {
-            println!("  • {}", style(&tv.name).cyan());
+            println!("  - {}", style(&tv.name).cyan());
         }
     }
 }
@@ -489,7 +573,7 @@ async fn do_pair(
     };
 
     let confirm = Confirm::new(&format!(
-        "Bắt đầu pair {} với {} ở mode {}?",
+        "Start pairing {} with {} in {} mode?",
         device.name, device.key, kind_label
     ))
     .with_default(true)
@@ -500,19 +584,18 @@ async fn do_pair(
     }
 
     println!(
-        "\n{} Đang pair... (theo dõi prompt \"Trust\"` trên iPhone)\n",
-        style("→").cyan().bold()
+        "\n{} Pairing started... watch for Trust prompt on iPhone\n",
+        style(">>").cyan().bold()
     );
 
     backend.send(Command::CreatePairing {
         key: device.key,
         kind,
-    là });
+    });
 
-    // Đợi event loop in progress
     tokio::time::sleep(Duration::from_secs(30)).await;
 
-    để Ok(())
+    Ok(())
 }
 
 async fn do_validate(
@@ -521,7 +604,10 @@ async fn do_validate(
 ) -> Result<()> {
     let device = pick_device(state).await?;
 
-    println!("\n{} Đang validate...\n", style("→").cyan().bold());
+    println!(
+        "\n{} Validating...\n",
+        style(">>").cyan().bold()
+    );
 
     backend.send(Command::Validate {
         key: device.key,
@@ -538,7 +624,10 @@ async fn do_list_apps(
 ) -> Result<()> {
     let device = pick_device(state).await?;
 
-    println!("\n{} Đang list apps...\n", style("→").cyan().bold());
+    println!(
+        "\n{} Listing apps...\n",
+        style(">>").cyan().bold()
+    );
 
     backend.send(Command::ListApps {
         key: device.key,
@@ -565,8 +654,8 @@ async fn do_install_apps(
         Some(apps) if !apps.is_empty() => apps,
         _ => {
             println!(
-                "\n{} Chưa có danh sách apps, đang list...\n",
-                style("→").cyan().bold()
+                "\n{} No cached apps, listing now...\n",
+                style(">>").cyan().bold()
             );
             backend.send(Command::ListApps {
                 key: key.clone(),
@@ -580,7 +669,7 @@ async fn do_install_apps(
     };
 
     if apps.is_empty() {
-        anyhow::bail!("Không tìm thấy app nào hỗ trợ pairing file.");
+        anyhow::bail!("No supported app found for pairing file install.");
     }
 
     let choices: Vec<String> = apps
@@ -588,9 +677,12 @@ async fn do_install_apps(
         .map(|a| format!("{} ({})", a.name, a.bundle_id))
         .collect();
 
-    let selected = MultiSelect::new("Chọn app để install pairing file:", choices)
-        .with_page_size(10)
-        .prompt()?;
+    let selected = MultiSelect::new(
+        "Select apps to install pairing file:",
+        choices,
+    )
+    .with_page_size(10)
+    .prompt()?;
 
     for label in selected {
         let app = apps
@@ -600,8 +692,8 @@ async fn do_install_apps(
 
         if let Some(app) = app {
             println!(
-                "\n{} Đang install vào {}...\n",
-                style("→").cyan().bold(),
+                "\n{} Installing into {}...\n",
+                style(">>").cyan().bold(),
                 style(&app.name).cyan()
             );
 
@@ -619,8 +711,8 @@ async fn do_install_apps(
 
 async fn do_wireless_accept(backend: &backend::Backend) -> Result<()> {
     println!(
-        "\n{} Bắt đầu wireless pairing... (nhấn Enter để dừng)\n",
-        style("→").cyan().bold()
+        "\n{} Starting wireless pairing... (press Enter to stop)\n",
+        style(">>").cyan().bold()
     );
 
     backend.send(Command::StartWirelessPairing);
@@ -642,20 +734,20 @@ async fn do_wireless_apple_tv(
     let tvs = state.read().await.apple_tvs.clone();
 
     if tvs.is_empty() {
-        anyhow::bail!("Không tìm thấy Apple TV nào qua mDNS.");
+        anyhow::bail!("No Apple TV found via mDNS.");
     }
 
     let labels: Vec<String> = tvs.iter().map(|tv| tv.name.clone()).collect();
-    let choice = Select::new("Chọn Apple TV:", labels).prompt()?;
+    let choice = Select::new("Select Apple TV:", labels).prompt()?;
 
     let tv = tvs
         .into_iter()
         .find(|t| t.name == choice)
-        .context("Apple TV không tồn tại")?;
+        .context("Apple TV no longer exists")?;
 
     println!(
-        "\n{} Đang pair Apple TV {}...\n",
-        style("→").cyan().bold(),
+        "\n{} Pairing Apple TV {}...\n",
+        style(">>").cyan().bold(),
         style(&tv.name).cyan()
     );
 
@@ -669,16 +761,16 @@ async fn do_save_pairing(state: &Arc<RwLock<AppState>>) -> Result<()> {
     let s = state.read().await;
 
     if s.last_pairing.is_empty() {
-        anyhow::bail!("Chưa có pairing file nào được tạo trong session này.");
+        anyhow::bail!("No pairing file created in this session.");
     }
 
     let keys: Vec<String> = s.last_pairing.keys().cloned().collect();
-    let choice = Select::new("Chọn pairing file để lưu:", keys).prompt()?;
+    let choice = Select::new("Select pairing file to save:", keys).prompt()?;
 
     let info = s
         .last_pairing
         .get(&choice)
-        .context("pairing info không tồn tại")?;
+        .context("pairing info not found")?;
 
     let filename = format!(
         "{}_{}",
@@ -687,13 +779,95 @@ async fn do_save_pairing(state: &Arc<RwLock<AppState>>) -> Result<()> {
     );
 
     std::fs::write(&filename, &info.bytes)
-        .with_context(|| format!("không ghi được {}", filename))?;
+        .with_context(|| format!("failed to write {}", filename))?;
 
     println!(
-        "\n{} Đã lưu {} ({} bytes)\n",
-        style("✓").green().bold(),
+        "\n{} Saved {} ({} bytes)\n",
+        style("OK").green().bold(),
         style(&filename).cyan(),
         info.bytes.len()
+    );
+
+    Ok(())
+}
+
+async fn do_load_from_cache(state: &Arc<RwLock<AppState>>) -> Result<()> {
+    let cache = Cache::open()?;
+    let entries = cache.list()?;
+
+    if entries.is_empty() {
+        anyhow::bail!("Cache is empty. No paired device yet.");
+    }
+
+    let labels: Vec<String> = entries
+        .iter()
+        .map(|m| {
+            format!(
+                "{} [{}] {} (iOS {})",
+                m.device_name,
+                match m.kind {
+                    cache::PairingKindMeta::Lockdown => "Lockdown",
+                    cache::PairingKindMeta::Remote => "Remote",
+                },
+                m.udid,
+                m.ios_version
+            )
+        })
+        .collect();
+
+    let choice = Select::new("Select pairing file from cache:", labels)
+        .with_page_size(10)
+        .prompt()?;
+
+    let idx = labels
+        .iter()
+        .position(|l| l == &choice)
+        .context("cache entry not found")?;
+
+    let meta = &entries[idx];
+    let kind = match meta.kind {
+        cache::PairingKindMeta::Lockdown => PairingKind::Lockdown,
+        cache::PairingKindMeta::Remote => PairingKind::Remote,
+    };
+
+    let bytes = cache
+        .load(&meta.key, kind)?
+        .context("cache file missing")?;
+
+    let mut s = state.write().await;
+    s.last_pairing.insert(
+        meta.key.clone(),
+        PairingInfo {
+            file_name: meta.file_name.clone(),
+            bytes: bytes.clone(),
+        },
+    );
+
+    println!(
+        "\n{} Loaded pairing from cache for {} ({} bytes)\n",
+        style("OK").green().bold(),
+        style(&meta.device_name).cyan(),
+        bytes.len()
+    );
+
+    Ok(())
+}
+
+async fn do_clear_cache() -> Result<()> {
+    let confirm = Confirm::new("Clear all pairing cache?")
+        .with_default(false)
+        .prompt()?;
+
+    if !confirm {
+        return Ok(());
+    }
+
+    let cache = Cache::open()?;
+    cache.clear()?;
+
+    println!(
+        "\n{} Cache cleared\n",
+        style("OK").green().bold()
     );
 
     Ok(())
