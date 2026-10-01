@@ -2,21 +2,24 @@ name: Build Android ARMv7
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   build-armv7:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Cache cargo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo
         uses: actions/cache@v4
         with:
           path: |
@@ -36,21 +39,51 @@ jobs:
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r25b
+          ndk-version: r27c
           add-to-path: true
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: |
+          cargo install cargo-ndk --locked
+
+      - name: Configure Android linker
+        run: |
+          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "$TOOLCHAIN/bin" >> "$GITHUB_PATH"
+
+          echo "RUSTFLAGS=-C link-arg=-landroid-support" >> "$GITHUB_ENV"
+
+          echo "NDK: $NDK"
+          echo "Toolchain: $TOOLCHAIN"
+
+      - name: Verify Android toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo ndk --version
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
 
       - name: Build ARMv7
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo ndk -t armeabi-v7a -o ./jniLibs build --release
+        run: |
+          cargo ndk \
+            -t armeabi-v7a \
+            -o ./jniLibs \
+            build \
+            --release
 
-      - name: Upload artifact
+      - name: Verify binary
+        run: |
+          find jniLibs -type f -maxdepth 3 -print
+          file jniLibs/armeabi-v7a/*
+
+      - name: Upload ARMv7 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: android-armv7-binary
+          name: idevice-pair-android-armv7
           path: jniLibs/armeabi-v7a/
           if-no-files-found: error
