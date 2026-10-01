@@ -79,7 +79,7 @@ jobs:
           ndk-version: r26b
           add-to-path: true
 
-       - name: Build (Android)
+      - name: Build (Android)
         if: contains(matrix.target, 'android')
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -91,7 +91,6 @@ jobs:
             -o ./jniLibs \
             --link-builtins \
             build --release
-            --target ${{ matrix.target }}
 
       - name: Build (Linux)
         if: contains(matrix.target, 'linux-gnu')
