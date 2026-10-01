@@ -85,14 +85,8 @@ fn handle_event(
                     device.key
                 );
 
-                /*
-                 * USB devices can immediately enter the pairing flow.
-                 *
-                 * Network/Remote devices are left alone here because
-                 * they may require their own pairing/discovery flow.
-                 */
                 if device.transport == Transport::Usb
-                    && pairing_started.insert(device.key.clone())
+                    && pairing_started.insert(format!("{}:inspect", device.key))
                 {
                     println!(
                         "{}: device detected, inspecting...",
@@ -170,18 +164,6 @@ fn handle_event(
                     eprintln!("{key}: {name}: {error}");
                 }
             }
-
-            /*
-             * Developer mode is only an informational check.
-             *
-             * The pairing flow itself starts after the device has
-             * been inspected. We intentionally do not trigger pairing
-             * from this event because Inspect emits multiple Check
-             * events and that would make the flow race.
-             *
-             * The actual pairing command is triggered by the
-             * successful device inspection below.
-             */
         }
 
         Event::PairRecord { key, stored } => {
@@ -194,17 +176,31 @@ fn handle_event(
                 }
             );
 
-            /*
-             * If a USB device already has a stored lockdown record,
-             * the backend can still create the pairing payload and
-             * normalize the UDID for us.
-             */
-            if stored
-                && pairing_started.insert(format!("{key}:stored"))
-            {
-                println!(
-                    "{key}: stored pairing record available."
-                );
+            if stored {
+                // Đã có pairing record → validate + list apps
+                if validation_started.insert(key.clone()) {
+                    println!("{key}: validating stored pairing...");
+
+                    backend.send(Command::Validate {
+                        key,
+                        ip: None,
+                    });
+                }
+            } else {
+                // Chưa có → tạo pairing mới (Lockdown cho iOS 16)
+                if pairing_started.insert(format!("{key}:pair")) {
+                    println!(
+                        "{key}: no pairing record, starting Lockdown pairing..."
+                    );
+                    println!(
+                        "{key}: tap \"Trust\" on your iPhone when prompted."
+                    );
+
+                    backend.send(Command::CreatePairing {
+                        key,
+                        kind: PairingKind::Lockdown,
+                    });
+                }
             }
         }
 
@@ -267,9 +263,16 @@ fn handle_event(
                         pairing.file_name
                     );
 
-                    println!(
-                        "{key}: validating pairing..."
-                    );
+                    // Sau khi pair thành công, lưu file ra đĩa
+                    let filename = format!("{}.mobiledevicepairing", key.replace(':', "_"));
+                    if let Err(error) = std::fs::write(&filename, &pairing.bytes) {
+                        eprintln!("{key}: failed to save {filename}: {error}");
+                    } else {
+                        println!("{key}: pairing file saved to {filename}");
+                    }
+
+                    // Validate lại để chắc chắn record hoạt động
+                    println!("{key}: validating pairing...");
 
                     if validation_started.insert(key.clone()) {
                         backend.send(Command::Validate {
