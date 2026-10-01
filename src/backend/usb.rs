@@ -1,6 +1,8 @@
 use futures_util::StreamExt;
 
 use idevice::{
+    Idevice,
+    IdeviceError,
     IdeviceService,
     lockdown::LockdownClient,
     pairing_file::PairingFile,
@@ -12,16 +14,15 @@ use idevice::{
         UsbmuxdDevice,
         UsbmuxdListenEvent,
     },
-    IdeviceError,
 };
 
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, warn};
 
 use super::{
+    DeviceInfo,
     host_label,
     link::{device_info, value},
-    DeviceInfo,
 };
 
 const DESCRIBE_TIMEOUT: std::time::Duration =
@@ -36,12 +37,8 @@ pub struct UsbDevice {
 }
 
 /// Enumerate all devices currently visible through usbmuxd.
-///
-/// Devices that cannot be described through Lockdown are skipped.
-/// This is intentional: a device can appear in usbmuxd before its
-/// Lockdown service is ready.
 pub async fn list() -> Result<Vec<UsbDevice>, IdeviceError> {
-    let connection =
+    let mut connection =
         UsbmuxdConnection::default().await?;
 
     let devices =
@@ -85,13 +82,7 @@ pub async fn pair_record(
 }
 
 /// Watch usbmuxd for device connect/disconnect events.
-///
-/// The watcher deliberately uses a separate task/runtime from the
-/// main backend so a broken usbmuxd connection does not terminate
-/// the worker.
-pub async fn watch(
-    changes: UnboundedSender<()>,
-) {
+pub async fn watch(changes: UnboundedSender<()>) {
     if let Err(error) = listen(&changes).await {
         warn!(
             "usbmuxd listen stopped: {}",
@@ -100,9 +91,14 @@ pub async fn watch(
     }
 }
 
-async fn listen(changes: &UnboundedSender<()>) -> Result<(), IdeviceError> {
-    let mut connection = UsbmuxdConnection::default().await?;
-    let mut stream = connection.listen().await?;
+async fn listen(
+    changes: &UnboundedSender<()>,
+) -> Result<(), IdeviceError> {
+    let mut connection =
+        UsbmuxdConnection::default().await?;
+
+    let mut stream =
+        connection.listen().await?;
 
     while let Some(event) = stream.next().await {
         match event? {
@@ -113,11 +109,15 @@ async fn listen(changes: &UnboundedSender<()>) -> Result<(), IdeviceError> {
                     device.connection_type
                 );
 
-                changes.send(()).expect("device watcher stopped");
+                changes
+                    .send(())
+                    .expect("device watcher stopped");
             }
 
             UsbmuxdListenEvent::Disconnected(_) => {
-                changes.send(()).expect("device watcher stopped");
+                changes
+                    .send(())
+                    .expect("device watcher stopped");
             }
         }
     }
@@ -126,9 +126,6 @@ async fn listen(changes: &UnboundedSender<()>) -> Result<(), IdeviceError> {
 }
 
 /// Obtain Lockdown information for one device.
-///
-/// A short timeout is used because a device may be visible through
-/// usbmuxd while Lockdown is still starting or waiting for trust.
 async fn describe(
     device: &UsbmuxdDevice,
 ) -> Option<(String, DeviceInfo)> {
@@ -161,23 +158,20 @@ async fn describe(
     }
 }
 
-/// Connect to Lockdown and retrieve the device name and
-/// basic device information.
+/// Connect to Lockdown and retrieve the device name
+/// and basic device information.
 async fn ask(
     device: &UsbmuxdDevice,
 ) -> Result<(String, DeviceInfo), IdeviceError> {
-    let provider = device.to_provider(
-        UsbmuxdAddr::default(),
-        host_label(),
-    );
+    let provider =
+        device.to_provider(
+            UsbmuxdAddr::default(),
+            host_label(),
+        );
 
     let mut client =
         LockdownClient::connect(&provider).await?;
 
-    // USB devices can expose Lockdown directly.
-    //
-    // Network usbmuxd devices require an authenticated Lockdown
-    // session using the stored pairing record.
     if device.connection_type != Connection::Usb {
         let pairing_file =
             provider.get_pairing_file().await?;
