@@ -47,12 +47,13 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --version 4.0.3 --locked
 
+      - name: Install build tools for aws-lc-sys
+        run: sudo apt-get update && sudo apt-get install -y cmake nasm
+
       - name: Build ARMv7
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-          CLANG_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
-          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
         run: cargo ndk -t armeabi-v7a -o ./jniLibs --link-builtins build --release
 
       - name: Upload artifact
