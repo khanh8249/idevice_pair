@@ -100,19 +100,14 @@ pub async fn watch(
     }
 }
 
-async fn listen(
-    changes: &UnboundedSender<()>,
-) -> Result<(), IdeviceError> {
-    let mut connection =
-        UsbmuxdConnection::default().await?;
-
-    let mut stream =
-        connection.listen().await?;
+async fn listen(changes: &UnboundedSender<()>) -> Result<(), IdeviceError> {
+    let mut connection = UsbmuxdConnection::default().await?;
+    let mut stream = connection.listen().await?;
 
     while let Some(event) = stream.next().await {
         match event? {
             UsbmuxdListenEvent::Connected(device) => {
-                tracing::debug!(
+                debug!(
                     "usbmuxd device connected: {} ({:?})",
                     device.udid,
                     device.connection_type
@@ -123,8 +118,6 @@ async fn listen(
 
             UsbmuxdListenEvent::Disconnected(_) => {
                 changes.send(()).expect("device watcher stopped");
-            }
-        }
             }
         }
     }
