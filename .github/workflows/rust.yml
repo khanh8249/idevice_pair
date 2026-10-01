@@ -32,23 +32,23 @@ jobs:
         with:
           targets: armv7-linux-androideabi
 
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27
+          add-to-path: true
+
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --version 3.5.7 --locked
+        run: cargo install cargo-ndk --version 4.0.3 --locked
 
       - name: Install build tools for aws-lc-sys
         run: sudo apt-get update && sudo apt-get install -y cmake nasm
 
-      - name: Sanitize environment
-        run: |
-          unset CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER
-          unset CARGO_NDK_OUTPUT_PATH
-          unset CARGO_NDK_CMAKE_TOOLCHAIN_PATH
-          env | grep -E 'NDK|CARGO' | sed 's/=.*/=<set>/' || true
-
       - name: Build ARMv7
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK }}
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: cargo ndk -t armeabi-v7a -o ./jniLibs --link-builtins build --release
 
       - name: Upload artifact
