@@ -79,7 +79,7 @@ jobs:
           ndk-version: r26b
           add-to-path: true
 
-      - name: Build (Android)
+       - name: Build (Android)
         if: contains(matrix.target, 'android')
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -87,9 +87,10 @@ jobs:
         run: |
           cargo ndk \
             -t ${{ matrix.ndk_target }} \
+            --platform 24 \
             -o ./jniLibs \
             --link-builtins \
-            build --release \
+            build --release
             --target ${{ matrix.target }}
 
       - name: Build (Linux)
